@@ -179,7 +179,6 @@ Dependencies: No external services required.
     - id: metacog-task
       name: '@local/dsh-metacog-task'
       config:
-        taskDir: '<your-data-dir>/metacog-task-data'  # Where task records and memory live
         fsyncEvery: 16                                 # fsync every N records
         taskBoundaryHints: true                        # Inject task boundary hints
         injectReflection: true                         # Inject retrospective material on task_end
