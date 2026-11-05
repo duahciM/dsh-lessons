@@ -163,7 +163,6 @@ plugin_manager install_bundle target=<本目录绝对路径>
     - id: metacog-task
       name: '@local/dsh-metacog-task'
       config:
-        taskDir: 'D:/LLM/metacog-task/data'   # 记忆与任务记录位置
         taskBoundaryHints: true                # 注入任务边界提示
         injectReflection: true                 # task_end 时注入复盘材料
         lessons:
