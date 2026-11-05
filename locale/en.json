@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Metacognition Task Boundaries",
+    "description": "task_start / task_end tools that mark task boundaries, slice the task's context from existing events, and return a review brief when the task closes."
+  }
+}
