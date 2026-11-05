@@ -1,5 +1,6 @@
 # DSH 元认知插件（metacog-task）
 （效果不保证）
+[English](README_en.md) | [简体中文](README.md)
 > 让 Agent 在任务结束后复盘，把可复用的经验沉淀下来，并在后续任务中按作用域注入。
 >
 > 运行环境 DeepSeek Harness `0.2.1-rc.5` · 单包安装
