@@ -42,11 +42,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dauhciM/dsh-lessons.git"
+    "url": "git+https://github.com/duahciM/dsh-lessons.git"
   },
-  "homepage": "https://github.com/dauhciM/dsh-lessons#readme",
+  "homepage": "https://github.com/duahciM/dsh-lessons#readme",
   "bugs": {
-    "url": "https://github.com/dauhciM/dsh-lessons/issues"
+    "url": "https://github.com/duahciM/dsh-lessons/issues"
   },
   "publishConfig": {
     "access": "public",
