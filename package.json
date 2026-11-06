@@ -1,0 +1,55 @@
+{
+  "name": "dsh-lessons",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Metacognition for DeepSeek Harness: task boundaries, structured reflection, and three-scope lessons injected into the system prompt.",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.5"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "lib/*.js",
+    "tools/*.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README_en.md",
+    "docs/*.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh",
+    "metacognition",
+    "memory",
+    "lessons",
+    "cordis"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dauhciM/dsh-lessons.git"
+  },
+  "homepage": "https://github.com/dauhciM/dsh-lessons#readme",
+  "bugs": {
+    "url": "https://github.com/dauhciM/dsh-lessons/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

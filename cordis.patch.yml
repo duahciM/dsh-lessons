@@ -1,0 +1,22 @@
+# DSH bundle patch, applied when this package is installed as a bundle.
+- insert:
+    - id: lessons
+      name: 'dsh-lessons'
+      config:
+        # Uncomment and set an absolute path to pin the data directory.
+        # Omitted, it defaults to <cwd>/dsh-lessons-data.
+        # taskDir: '/absolute/path/to/dsh-lessons-data'
+        fsyncEvery: 16
+        injectReflection: true
+        recordEvents: true
+        taskBoundaryHints: true
+        lessons:
+          enabled: true
+          sectionName: 'lessons:accumulated'
+          order: 10500
+          maxLessons: 0
+          diagnostics: true
+          scopes:
+            global: true
+            session: true
+            reflection: true
