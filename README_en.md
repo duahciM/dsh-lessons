@@ -1,5 +1,5 @@
 # DSH Task Retro Plugin (`dsh-lessons`)
-
+(translate by Gemini)
 > Effectiveness is not guaranteed — see Section 4 for what was actually measured.
 >
 > Enables the Agent to conduct post-task retrospectives, distill reusable lessons, and inject them into subsequent tasks by scope. Tool and failure events are also persisted for later analysis.
