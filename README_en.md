@@ -1,4 +1,6 @@
 # DSH Task Retro Plugin (`dsh-lessons`)
+[简体中文](README.md)
+
 (translated by Gemini)
 > Effectiveness is not guaranteed — see Section 4 for what was actually measured.
 >
