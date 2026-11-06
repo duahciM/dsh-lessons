@@ -163,7 +163,7 @@ plugin_manager install_bundle target=<本目录绝对路径>
 ```yaml
 - insert:
     - id: metacog-task
-      name: '@local/dsh-metacog-task'
+      name: 'dsh-metacog-task'
       config:
         taskBoundaryHints: true                # 注入任务边界提示
         injectReflection: true                 # task_end 时注入复盘材料
