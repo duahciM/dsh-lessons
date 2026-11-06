@@ -163,13 +163,13 @@ Both the raw count and the adjusted effective count are preserved. Looking only 
 
 ### 5.1 Installation
 
-#### Option A: one-click from the DSH UI (recommended)
+#### one-click from the DSH UI
 
 1. Open DSH and go to **Plugins → Add plugin**.
 2. Enter `dsh-lessons` (or the repository URL `https://github.com/dauhciM/dsh-lessons`), then click **Install**.
 3. Once installed, click **Enable now**.
 
-#### Option B: command line
+#### command line
 
 ```sh
 dsh plugin --profile web add dsh-lessons
