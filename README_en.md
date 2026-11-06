@@ -177,7 +177,7 @@ Dependencies: No external services required.
 ```yaml
 - insert:
     - id: metacog-task
-      name: '@local/dsh-metacog-task'
+      name: 'dsh-metacog-task'
       config:
         fsyncEvery: 16                                 # fsync every N records
         taskBoundaryHints: true                        # Inject task boundary hints
