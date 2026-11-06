@@ -1,4 +1,4 @@
-# DSH Metacognition Plugin (`dsh-lessons`)
+# DSH Task Retro Plugin (`dsh-lessons`)
 
 > Effectiveness is not guaranteed — see Section 4 for what was actually measured.
 >
