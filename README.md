@@ -1,4 +1,4 @@
-# DSH 元认知插件（dsh-lessons）
+# DSH任务复盘插件（dsh-lessons）
 （效果不保证）
 
 [English](README_en.md)
@@ -149,13 +149,13 @@ Agent可能在不同任务中重复犯错,当前会话结束后,相关上下文�
 
 ### 5.1 安装
 
-#### 方式 A：在 DSH 界面中一键安装（推荐）
+#### 在 DSH 界面中安装
 
 1. 打开 DSH，进入 **插件 → 添加插件**。
 2. 输入 `dsh-lessons`（或填入仓库地址 `https://github.com/dauhciM/dsh-lessons`），点击 **安装**。
 3. 安装完成后点击 **立即启用**。
 
-#### 方式 B：命令行安装
+#### 命令行安装
 
 ```sh
 dsh plugin --profile web add dsh-lessons
@@ -221,7 +221,7 @@ node tools/lessons.mjs check   # 引用完整性 / 状态自洽 / 边界是否�
 ## 六、文件结构
 
 ```text
-index.js                 插件入口：三个工具 + system prompt 注入 + 事件落盘
+index.js                 三个工具 + system prompt 注入 + 事件落盘
 lib/
   task-model.js          任务记录与参数校验
   task-context.js        决策轨迹截取（不含工具调用清单）
