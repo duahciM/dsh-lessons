@@ -243,9 +243,14 @@ switch (cmd) {
   case "remove": {
     const ids = args._;
     if (ids.length === 0) {
-      console.error("用法: remove <id> [<id> ...]");
+      console.error("用法: remove <id> [<id> ...] [--yes]");
+      console.error("");
+      console.error("  默认只预览，不写入。确认无误后加 --yes 才真正删除。");
       process.exit(2);
     }
+
+    // 先全部解析出来，再决定是否执行：避免「删了一半才发现某个 id 不存在」
+    const targets = [];
     let failed = 0;
     for (const id of ids) {
       const mem = allMemories().find((l) => l.id === id);
@@ -254,8 +259,32 @@ switch (cmd) {
         failed++;
         continue;
       }
-      tombstone(mem);
-      console.log(`已删除 ${id}`);
+      targets.push(mem);
+    }
+
+    if (targets.length === 0) process.exit(1);
+
+    // 预览：人类审批需要看到「删的是什么」，而不只是一串 id
+    console.log(`将要删除以下 ${targets.length} 条记忆：`);
+    for (const m of targets) {
+      console.log(`  - ${m.id}  [${m.scope}/${m.status}]`);
+      const body = m.pattern || m.correction || "(无正文)";
+      console.log(`      ${body.slice(0, 120)}`);
+    }
+    console.log("");
+    console.log("删除 = 写入墓碑（deleted: true），该条不再注入，历史记录仍保留可审计。");
+
+    if (args.yes !== true) {
+      console.error("");
+      console.error("未删除。确认无误后加 --yes 重试：");
+      console.error(`  lessons remove ${ids.join(" ")} --yes`);
+      // 3 = 等待审批（区别于 1 = 执行失败）
+      process.exit(failed > 0 ? 1 : 3);
+    }
+
+    for (const m of targets) {
+      tombstone(m);
+      console.log(`已删除 ${m.id}`);
     }
     if (failed > 0) process.exit(1);
     break;

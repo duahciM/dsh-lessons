@@ -17,7 +17,8 @@ import { createHash } from "node:crypto";
 import { buildTaskRecord, newTaskId, TASK_STATUS, validateEnd, validateStart } from "./lib/task-model.js";
 import { renderReflectionBrief, sliceDecisionTrail } from "./lib/task-context.js";
 import { buildReflectionRecord, validateReflect } from "./lib/reflection-model.js";
-import { createLessonStore, renderLessonsSection, parseLessons, parseLessonEntries } from "./lib/lessons.js";
+import { createLessonStore, renderLessonsSection, parseLessons, parseLessonEntries, parseCommitState, pendingReflections } from "./lib/lessons.js";
+import { renderInstantNotice, shouldCommit } from "./lib/instant-notice.js";
 import { classifyToolOutcome } from "./lib/classify.js";
 import { createDurableWriter } from "./lib/writer.js";
 
@@ -61,7 +62,11 @@ const TASK_BOUNDARY_TEXT = [
  * 漏开任务时的提醒正文。
  *
  * 措辞必须与上面的判定保持一致——否则模型会拿到两套「什么算任务」的标准。
- * 这里只陈述事实（做了多少工作）+ 复述判定 + 给出补救动作。
+ *
+ * 这里**只向前看**：明确不要求事后补开。原因是补开得到的决策窗口是空的，
+ * 反思只能基于零证据编造；而 TASK_BOUNDARY_TEXT 本身也写着
+ * 「Never do the work first and declare the task afterwards」。
+ * 两份文本若一要求补开、一禁止补开，模型会收到互相冲突的指令。
  */
 function missedTaskText(calls, edits) {
   const work = [`${calls} 次工具调用`];
@@ -73,8 +78,8 @@ function missedTaskText(calls, edits) {
     "按任务的定义：一个具有明确目标或预期结果、需要一个或多个工作步骤才能完成的工作单元。",
     "用户要求完成的工作算任务；不确定是否属于任务时，优先把它当作任务。",
     "",
-    "如果这一回合构成这样的工作单元，请现在用 task_start 声明、用 task_end 结束，",
-    "让它被记录下来，然后用 task_reflect 写下你的结论。",
+    "从下一个任务开始：把 task_start 作为第一项动作，先于读文件、运行命令、搜索或编辑。",
+    "本次不需要事后补开——补开得到的决策窗口是空的，反思只能基于零证据编造。",
     "</lessons_task_missing>",
   ].join("\n");
 }
@@ -84,6 +89,29 @@ const DEFAULTS = {
   fsyncEvery: 32,
   /** 反思材料注入开关，便于对照测试 */
   injectReflection: true,
+  /**
+   * 是否把「决策环境快照」渲染进反思材料（默认开启）。
+   *
+   * 记录本身（task_open.environment）**始终写入**，与本开关无关 —— 它供事后审计、
+   * 追查经验影响、保证历史不可变。
+   *
+   * 渲染只影响反思材料里的 DECISION ENVIRONMENT 段：
+   *   · 开启：反思时不用回翻几十万 token 去 system prompt 找当时生效的约束，
+   *           近因效应下更容易做出「我有没有遵循」的判断；
+   *   · 关闭：省下约 800 token/次反思（实测 11 条经验约 1986 字符），
+   *           代价是模型需要自己往上翻。
+   */
+  environmentInBrief: true,
+  /**
+   * 任务状态从 `tasks.jsonl` 推导（默认开启）。
+   *
+   * 进行中任务、可反思任务、「本会话是否开过任务」、提醒次数原本都是内存态，
+   * 插件重载或进程重启后全部丢失，导致任务断裂与反复误报。这些事实其实都
+   * 写在 tasks.jsonl 里，启动时按文件重建即可。
+   *
+   * 关闭后退回纯内存态（重载即丢）。
+   */
+  stateFromFile: true,
   /** 事件落盘（工具调用/失败），只记录不注入 */
   recordEvents: true,
   /** 任务边界提示段（告诉模型何时调用 task_start / task_end） */
@@ -99,7 +127,13 @@ const DEFAULTS = {
    */
   missedTaskNudge: true,
   missedTaskNudgeMode: "inject",
-  missedTaskMinCalls: 3,
+  /**
+   * 触发提醒所需的最少工具调用数。
+   *
+   * 3 太低：正常的分析/验证任务动辄十几次调用，会被普遍判为「漏开」并反复打扰。
+   * 提醒只用于捕捉明显偏离（一整回合都在干活却忘了声明），因此取较高阈值。
+   */
+  missedTaskMinCalls: 8,
   missedTaskMaxPerSession: 2,
   /** 步骤 3：把积累的经验注入 system prompt */
   lessons: {
@@ -120,6 +154,29 @@ const DEFAULTS = {
     scopes: { global: true, session: true, reflection: true },
     /** 手工/晋升写入的 global 与 session 条目；默认 <taskDir>/lessons/lessons.jsonl */
     lessonFile: undefined,
+    /**
+     * 攒批总开关（默认开启）。
+     *
+     * 开启后：新反思不立即改 system prompt，而是先累积成 pending，
+     * 达到阈值才推进一次水位 —— 这样每条反思都不会触发全量重算。
+     */
+    batching: true,
+    /**
+     * 反思即时注入：task_reflect 后立刻发一条 plugin 通知。
+     *
+     * 依据 2026-11-07 实测（cache-probe/controlled.mjs）：
+     *   plugin 类注入 20/20 样本命中率 >= 99.6%（均值 99.9%）
+     *   system/message 变更 8/8 样本命中率 <= 0.7%（多数 cached=0）
+     * 因此「即时注入 + system prompt 攒批」用极小的缓存代价换取近因效果。
+     *
+     * 注意：仅在 batching 开启时有效。攒批关闭时 section 已实时反映全部条目，
+     * 再发即时通知会重复。
+     */
+    instantNotice: true,
+    /** 攒批阈值：待提交条数达到该值即触发一次 system prompt 重算。0 = 只看 token 阈值 */
+    commitEvery: 8,
+    /** 攒批 token 阈值（按字符数/3 粗估）；0 = 不按 token 判断 */
+    commitEveryTokens: 0,
   },
 };
 
@@ -129,6 +186,8 @@ function readConfig(raw) {
     if (typeof raw.taskDir === "string" && raw.taskDir) cfg.taskDir = raw.taskDir;
     if (Number.isSafeInteger(raw.fsyncEvery) && raw.fsyncEvery > 0) cfg.fsyncEvery = raw.fsyncEvery;
     if (typeof raw.injectReflection === "boolean") cfg.injectReflection = raw.injectReflection;
+    if (typeof raw.environmentInBrief === "boolean") cfg.environmentInBrief = raw.environmentInBrief;
+    if (typeof raw.stateFromFile === "boolean") cfg.stateFromFile = raw.stateFromFile;
     if (typeof raw.recordEvents === "boolean") cfg.recordEvents = raw.recordEvents;
     if (typeof raw.taskBoundaryHints === "boolean") cfg.taskBoundaryHints = raw.taskBoundaryHints;
     if (typeof raw.taskBoundarySectionName === "string" && raw.taskBoundarySectionName) {
@@ -153,6 +212,10 @@ function readConfig(raw) {
       if (Number.isSafeInteger(l.maxLessons) && l.maxLessons >= 0) cfg.lessons.maxLessons = l.maxLessons;
       if (typeof l.diagnostics === "boolean") cfg.lessons.diagnostics = l.diagnostics;
       if (typeof l.lessonFile === "string" && l.lessonFile) cfg.lessons.lessonFile = l.lessonFile;
+      if (typeof l.batching === "boolean") cfg.lessons.batching = l.batching;
+      if (typeof l.instantNotice === "boolean") cfg.lessons.instantNotice = l.instantNotice;
+      if (Number.isSafeInteger(l.commitEvery) && l.commitEvery >= 0) cfg.lessons.commitEvery = l.commitEvery;
+      if (Number.isSafeInteger(l.commitEveryTokens) && l.commitEveryTokens >= 0) cfg.lessons.commitEveryTokens = l.commitEveryTokens;
       if (l.scopes && typeof l.scopes === "object") {
         for (const k of ["global", "session", "reflection"]) {
           if (typeof l.scopes[k] === "boolean") cfg.lessons.scopes[k] = l.scopes[k];
@@ -177,6 +240,18 @@ export function apply(ctx, rawConfig) {
   const logger = safe(() => ctx.logger, undefined);
   const warn = (m) => safe(() => logger?.warn?.(m));
   const info = (m) => safe(() => logger?.info?.(m));
+
+  /**
+   * 攒批是否真正生效。
+   *
+   * 开关 ``batching`` 之外还要求至少一个阈值有效：两者都为 0 时没有提交点，
+   * 攒批会永远不触发（pending 只增不减），不如直接视为关闭。
+   */
+  const batchingOn =
+    cfg.lessons.batching !== false &&
+    (cfg.lessons.commitEvery > 0 || cfg.lessons.commitEveryTokens > 0);
+  /** 即时通知只在攒批开启时才有意义，否则与实时 section 重复。 */
+  const instantNoticeOn = batchingOn && cfg.lessons.instantNotice !== false;
 
   const writer = createDurableWriter(join(cfg.taskDir, "tasks.jsonl"), {
     fsyncEvery: cfg.fsyncEvery,
@@ -282,7 +357,13 @@ export function apply(ctx, rawConfig) {
     try {
       // 分域求值：global 全局可见；session/reflection 只对所属会话可见
       const sessionId = resolveSessionId(context);
-      const { lessons } = lessonStore.read(sessionId, cfg.lessons.scopes);
+      // 攒批水位：水位之后的反思不进 section（它们只走即时通知），
+      // 只有攒满提交后 section 才变化一次 —— 这是缓存友好的关键。
+      let committedAt = Number.POSITIVE_INFINITY;
+      if (batchingOn) {
+        committedAt = parseCommitState(lessonStore.readTaskText());
+      }
+      const { lessons } = lessonStore.read(sessionId, cfg.lessons.scopes, committedAt);
       const text = renderLessonsSection(lessons, { maxLessons: cfg.lessons.maxLessons });
       renderCount += 1;
       const hash = createHash("sha1").update(text).digest("hex").slice(0, 12);
@@ -370,9 +451,18 @@ export function apply(ctx, rawConfig) {
    * 不能只靠内存集合：插件重载或进程重启会清空它，于是「两天前开过任务」
    * 的会话会被误判成从未开过、收到误报。所以首次判断时回扫一次会话日志，
    * 之后靠集合（task_start 也会即时写入集合）与「已扫描」标记短路。
+   *
+   * 注意：**只有确实读到历史时才缓存否定结论**。`readEvents` 在
+   * sessionQuery 未就绪或瞬时失败时返回空数组，此时若直接写入
+   * scannedNoTask，该会话会被永久误判为「从未开过任务」——此后每回合
+   * 都会误报，直到下次插件重载。实测曾出现：日志里已有 28 次 task_start，
+   * 仍持续收到「没有声明任何任务」。
    */
   async function sessionEverOpenedTask(agent, sessionId) {
     if (everOpened.has(sessionId)) return true;
+    // 文件推导开启时，everOpened 已由 tasks.jsonl 重建，是权威来源：
+    // 没有记录就是确实没开过任务，无需再扫会话日志（既慢又易受读取失败影响）。
+    if (cfg.stateFromFile) return false;
     if (scannedNoTask.has(sessionId)) return false;
     const events = await readEvents(sessionIdOf(agent) ?? sessionId);
     if (Array.isArray(events)) {
@@ -383,7 +473,40 @@ export function apply(ctx, rawConfig) {
         }
       }
     }
-    scannedNoTask.add(sessionId);
+    // 诊断：判定为「没开过任务」时记录读到了什么，用于区分
+    // 「真的没开过」与「读不到 tool/call 事件」。仅在即将缓存否定结论时记录一次。
+    if (Array.isArray(events) && events.length > 0 && !scannedNoTask.has(sessionId)) {
+      const types = {};
+      const names = {};
+      let taskStarts = 0;
+      let sampleMissingName = 0;
+      for (const e of events) {
+        types[e?.type ?? "?"] = (types[e?.type ?? "?"] ?? 0) + 1;
+        if (e?.type === "tool/call") {
+          const n = e?.data?.name;
+          if (typeof n !== "string" || !n) sampleMissingName += 1;
+          else {
+            names[n] = (names[n] ?? 0) + 1;
+            if (n === "task_start") taskStarts += 1;
+          }
+        }
+      }
+      const topNames = Object.entries(names)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 15);
+      diagnostics({
+        ts: Date.now(),
+        kind: "missed-task-check",
+        session: sessionId,
+        events: events.length,
+        hasToolCall: Object.prototype.hasOwnProperty.call(types, "tool/call"),
+        taskStarts,
+        missingName: sampleMissingName,
+        topNames,
+        types,
+      });
+      scannedNoTask.add(sessionId);
+    }
     return false;
   }
 
@@ -430,6 +553,19 @@ export function apply(ctx, rawConfig) {
       if (calls < cfg.missedTaskMinCalls && edits === 0) return;
 
       nudgeCount.set(sessionId, used + 1);
+      // 落盘：重载后仍记得已提醒几次，否则 missedTaskMaxPerSession 形同虚设
+      if (cfg.stateFromFile) {
+        safe(() =>
+          writeRecord({
+            record_type: "nudge",
+            session_id: sessionId,
+            turn: payload?.turn ?? null,
+            calls,
+            edits,
+            recorded_at: Date.now(),
+          })
+        );
+      }
       const message = makeNoticeMessage(missedTaskText(calls, edits), `missed task in turn ${payload?.turn ?? "?"}`);
       if (cfg.missedTaskNudgeMode === "wake") safe(() => agent.followup(message));
       else safe(() => agent.inject(message));
@@ -464,6 +600,179 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
+   * 从 tasks.jsonl 重建任务状态（`stateFromFile`）。
+   *
+   * 重建四类事实：
+   *   open        有 open 记录、且没有对应的 close/orphan → 仍在进行中
+   *   closed      已关闭的任务及其已写 lesson 数（task_reflect 的校验来源）
+   *   everOpened  出现过任何任务记录的会话 → 说明开过任务
+   *   nudgeCount  已发出的漏开提醒次数（受 missedTaskMaxPerSession 约束）
+   *
+   * 只读不改：启动时重建一次，之后由正常写入路径维护内存副本。
+   */
+  function hydrateStateFromFile() {
+    if (!cfg.stateFromFile) return;
+    const text = safe(() => lessonStore.readTaskText(), "");
+    if (!text) return;
+
+    const opens = new Map(); // taskId -> open 记录
+    const endedTaskIds = new Set(); // 已结束（close/orphan）
+    const lessonCount = new Map(); // taskId -> 已写 lesson 数
+    const closedOrder = []; // 关闭顺序，用于有界截断
+
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let rec;
+      try {
+        rec = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
+      if (!rec || typeof rec !== "object") continue;
+      if (typeof rec.session_id === "string" && rec.session_id) everOpened.add(rec.session_id);
+
+      switch (rec.record_type) {
+        case "open":
+          if (rec.task_id) opens.set(rec.task_id, rec);
+          break;
+        case "close":
+        case "orphan":
+          if (rec.task_id) {
+            endedTaskIds.add(rec.task_id);
+            if (rec.record_type === "close") closedOrder.push(rec);
+          }
+          break;
+        case "reflection": {
+          if (rec.task_id) {
+            const n = Array.isArray(rec.lessons) ? rec.lessons.length : 0;
+            lessonCount.set(rec.task_id, (lessonCount.get(rec.task_id) ?? 0) + n);
+          }
+          break;
+        }
+        case "nudge":
+          if (rec.session_id) nudgeCount.set(rec.session_id, (nudgeCount.get(rec.session_id) ?? 0) + 1);
+          break;
+        default:
+          break;
+      }
+    }
+
+    // 进行中：有 open、未结束；同一会话取最后一次 open
+    let restoredOpen = 0;
+    for (const [taskId, rec] of opens) {
+      if (endedTaskIds.has(taskId) || !rec.session_id) continue;
+      open.set(rec.session_id, {
+        task: {
+          task_id: taskId,
+          goal: rec.goal,
+          expected_result: rec.expected_result,
+          start_time: rec.start_time,
+          start_seq: rec.start_seq ?? null,
+          parent_task_id: rec.parent_task_id ?? null,
+          // 决策环境快照：重载后仍要能读回任务开始时生效的经验
+          environment: rec.environment ?? null,
+        },
+      });
+      restoredOpen += 1;
+    }
+
+    // 可反思：最近 20 条 close
+    for (const rec of closedOrder.slice(-20)) {
+      closed.set(rec.task_id, {
+        record: rec,
+        lessonsWritten: lessonCount.get(rec.task_id) ?? 0,
+      });
+    }
+
+    if (restoredOpen > 0 || closed.size > 0 || everOpened.size > 0) {
+      info(
+        `[lessons] state restored from file: open=${restoredOpen}, closed=${closed.size}, sessions=${everOpened.size}`
+      );
+    }
+  }
+
+  // 启动即重建：重载后仍能继续已有任务、仍记得哪些会话开过任务。
+  hydrateStateFromFile();
+
+  /** 决策环境快照的规模上限：避免单条任务记录无限膨胀。 */
+  const ENV_MAX_LESSONS = 12;
+  const ENV_FIELD_LIMITS = { pattern: 200, correction: 240, applies_when: 120 };
+
+  function clipEnv(value, limit) {
+    const flat = String(value ?? "").replace(/\s+/g, " ").trim();
+    return flat.length > limit ? `${flat.slice(0, limit)}…` : flat;
+  }
+
+  /**
+   * 快照「任务开始时实际生效的经验」。
+   *
+   * 为什么在 task_start 而不是 task_end 重算：
+   *   - 事后重算会随经验修改而变化，历史任务当时看到的约束就丢了；
+   *   - deprecated 的条目会从历史里消失；
+   *   - 无法区分「当时注入的」与「事后新增的」；
+   *   - 无法追查某条经验是否参与过某次决策。
+   *
+   * 反思材料因此不只记录「做了什么」，还记录「做的时候受什么约束」。
+   *
+   * @returns {object|null} 快照；读取失败返回 null（不阻塞任务开启）
+   */
+  function captureEnvironment(sessionId) {
+    try {
+      let committedAt = Number.POSITIVE_INFINITY;
+      if (batchingOn) committedAt = parseCommitState(lessonStore.readTaskText());
+      const { lessons } = lessonStore.read(sessionId, cfg.lessons.scopes, committedAt);
+      const all = Array.isArray(lessons) ? lessons : [];
+      const shown = all.slice(0, ENV_MAX_LESSONS).map((l) => ({
+        id: l.id,
+        scope: l.scope,
+        confidence: l.confidence,
+        pattern: clipEnv(l.pattern, ENV_FIELD_LIMITS.pattern),
+        correction: clipEnv(l.correction, ENV_FIELD_LIMITS.correction),
+        applies_when: clipEnv(l.applies_when, ENV_FIELD_LIMITS.applies_when),
+      }));
+      return {
+        taken_at: Date.now(),
+        committed_at: committedAt === Number.POSITIVE_INFINITY ? null : committedAt,
+        count: all.length,
+        truncated: all.length > shown.length,
+        lessons: shown,
+      };
+    } catch (e) {
+      warn(`[lessons] environment snapshot failed: ${String(e)}`);
+      return null;
+    }
+  }
+
+  /**
+   * 攒批初始化（一次性）。
+   *
+   * 水位语义：只有 committed_at 之前的反思进 system prompt。没有提交记录时
+   * parseCommitState 返回 Infinity（= 全部已提交，向后兼容），那会导致新反思
+   * 也被立即注入、pending 永远为空 → 攒批永不触发。
+   *
+   * 所以首次启用攒批时先写一条 seed 记录，把「此刻之前已有的反思」固定为已提交；
+   * 之后新增的反思才会累积成 pending。写完即不再执行（有记录就不再 seed）。
+   */
+  if (batchingOn) {
+    try {
+      const existing = lessonStore.readTaskText();
+      if (parseCommitState(existing) === Number.POSITIVE_INFINITY) {
+        writeRecord({
+          record_type: "commit",
+          committed_at: Date.now(),
+          count: 0,
+          reason: "seed",
+          recorded_at: Date.now(),
+        });
+        info("[lessons] commit watermark seeded; batching starts from this point");
+      }
+    } catch (e) {
+      warn(`[lessons] commit seed failed: ${String(e)}`);
+    }
+  }
+
+  /**
    * Agent 在当前 DSH 里只有 `id`（即 SessionId），没有 `session` 属性。
    * 会话内容一律通过 sessionQuery 读取。
    */
@@ -484,15 +793,40 @@ export function apply(ctx, rawConfig) {
     return typeof last === "number" ? last : null;
   }
 
-  /** 读某会话的完整事件序列（异步，经 sessionQuery）。 */
+  /**
+   * 读某会话的完整事件序列（异步，经 sessionQuery）。
+   *
+   * **不能用 `listEvents`**：它的返回类型是 `SessionEventRecord`
+   * （sessionId / seq / type / time / surface），**没有 `data` 字段**。
+   * 用它读事件时 `e.data` 恒为 undefined，于是：
+   *   - 决策轨迹永远是空的（对话/纠正/结果全部取不到）
+   *   - 「本会话是否开过任务」永远判定为否 → 每回合误报
+   *   - 工具失败计数恒为 0
+   * 实测：10277 个事件中 1448 个 tool/call 全部缺 name。
+   *
+   * 正确来源是 `observeSession`（完整 `SessionEvent[]`，live 优先、不重放校验）；
+   * 它不可用时回退 `readSession`（完整但会重放校验，较慢）。
+   */
   async function readEvents(sessionId) {
     if (!sessionId) return [];
     const q = safe(() => ctx.get("sessionQuery"), undefined);
     if (q === undefined) return [];
-    const events = await safeAsync(() => q.listEvents(sessionId), []);
-    const last = Array.isArray(events) && events.length > 0 ? events[events.length - 1]?.seq : null;
 
-    return Array.isArray(events) ? events : [];
+    if (typeof q.observeSession === "function") {
+      const obs = await safeAsync(() => q.observeSession(sessionId, { projectionMode: "none" }), undefined);
+      if (obs !== undefined) {
+        try {
+          return Array.isArray(obs?.events) ? obs.events : [];
+        } finally {
+          safe(() => obs?.dispose?.());
+        }
+      }
+    }
+    if (typeof q.readSession === "function") {
+      const snap = await safeAsync(() => q.readSession(sessionId), undefined);
+      if (snap !== undefined && Array.isArray(snap?.events)) return snap.events;
+    }
+    return [];
   }
 
   async function safeAsync(fn, fallback) {
@@ -648,6 +982,8 @@ export function apply(ctx, rawConfig) {
         start_time: Date.now(),
         start_seq: await currentSeq(exec.agent),
         parent_task_id: typeof args.parent_task_id === "string" && args.parent_task_id.trim() ? args.parent_task_id.trim() : null,
+        // 决策环境快照：任务开始时实际生效的经验，冻结在此刻
+        environment: captureEnvironment(sessionId),
       };
       open.set(sessionId, { task });
 
@@ -661,6 +997,7 @@ export function apply(ctx, rawConfig) {
         start_time: task.start_time,
         start_seq: task.start_seq,
         parent_task_id: task.parent_task_id,
+        environment: task.environment,
       });
 
       return { task_id: taskId, goal: v.goal, expected_result: v.expected };
@@ -731,17 +1068,29 @@ export function apply(ctx, rawConfig) {
         parentTaskId: state.task.parent_task_id,
         closedBy: "manual",
       });
-      // 与 task_open 对齐：关闭记录也带 record_type，便于按类型筛选
-      writeRecord({ ...record, ev: "task_close", record_type: "close" });
+      // 与 task_open 对齐：关闭记录也带 record_type，便于按类型筛选。
+      // environment_ids 只放 id：用于反查「某条经验参与过哪些任务的决策」，
+      // 正文保留在对应的 task_open 记录里，不在此重复。
+      writeRecord({
+        ...record,
+        ev: "task_close",
+        record_type: "close",
+        environment_ids: (state.task.environment?.lessons ?? []).map((l) => l.id),
+      });
       rememberClosed(record);
 
       // 关闭任务，避免重复结束
       open.delete(sessionId);
 
-      // 反思材料只挂在本轮，通过 additionalContexts 进入下一步
+      // 反思材料只挂在本轮，通过 additionalContexts 进入下一步。
+      // 环境快照是否渲染由 environmentInBrief 控制；记录本身始终写入 task_open。
       const brief =
         cfg.injectReflection && trail.stats.events > 0
-          ? renderReflectionBrief({ task: record, trail })
+          ? renderReflectionBrief({
+              task: record,
+              trail,
+              environment: cfg.environmentInBrief ? state.task.environment : null,
+            })
           : undefined;
       if (brief) {
         safe(() => exec.deferContext?.(makeContextMessage(brief, record.task_id)));
@@ -878,6 +1227,62 @@ export function apply(ctx, rawConfig) {
         }));
       }
 
+
+      // ── 反思即时注入 + 攒批提交（方案 B）──────────────────────────────────
+      // 实测依据（cache-probe/controlled.mjs）：
+      //   plugin 类注入 20/20 样本缓存命中率 >= 99.6%
+      //   system/message 变更 8/8 样本命中率 <= 0.7%
+      // 所以：新教训先即时通知（零缓存代价），攒够再推进水位让 section 变一次。
+      if (instantNoticeOn && written.length > 0) {
+        try {
+          const taskText = lessonStore.readTaskText();
+          const committedAt = parseCommitState(taskText);
+          const pending = pendingReflections({ taskText, sessionId, committedAt });
+          const decision = shouldCommit({
+            pendingLessons: pending,
+            maxPending: cfg.lessons.commitEvery,
+            maxPendingTokens: cfg.lessons.commitEveryTokens,
+          });
+
+          if (decision.due) {
+            // 推进水位：写入提交记录，下一次装配才会把 pending 并进 section
+            const committedAtNew = Date.now();
+            writeRecord({
+              record_type: "commit",
+              committed_at: committedAtNew,
+              count: pending.length,
+              reason: decision.reason,
+              session_id: sessionId,
+              recorded_at: committedAtNew,
+            });
+            if (exec?.deferContext) {
+              exec.deferContext(makeNoticeMessage(
+                `<lessons_committed count="${pending.length}" reason="${decision.reason}">` +
+                  "\n" +
+                  `${pending.length} lesson(s) have been folded into the system prompt's Accumulated Lessons.` +
+                  "\n" +
+                  "They are no longer repeated here. New reflections will be announced individually from now on." +
+                  "\n" +
+                  `</lessons_committed>`,
+                `lessons committed: ${pending.length}`
+              ));
+            }
+            diagnostics({ ts: committedAtNew, kind: "commit", count: pending.length, reason: decision.reason });
+          } else {
+            const text = renderInstantNotice({
+              lessons: written,
+              taskId: v.taskId,
+              assessment: v.assessment,
+              pendingCount: pending.length,
+            });
+            if (exec?.deferContext && text) exec.deferContext(makeNoticeMessage(text, `new lessons: ${written.length}`));
+            diagnostics({ ts: Date.now(), kind: "instant", count: written.length, pending: pending.length });
+          }
+        } catch (e) {
+          warn(`[lessons] instant notice failed: ${String(e)}`);
+        }
+      }
+
       return { task_id: v.taskId, lessons_recorded: written.length };
     },
   });
@@ -906,18 +1311,26 @@ export function apply(ctx, rawConfig) {
   ctx.effect(
     () => () => {
       try {
-        for (const [sessionId, state] of open) {
-          writeRecord({
-            ev: "task_orphaned",
-            record_type: "orphan",
-            task_id: state.task.task_id,
-            session_id: sessionId,
-            goal: state.task.goal,
-            expected_result: state.task.expected_result,
-            start_time: state.task.start_time,
-            start_seq: state.task.start_seq,
-            closed_by: "session-end",
-          });
+        // stateFromFile 开启时不写 orphan。
+        //
+        // orphan 的语义是「这个任务不会再被结束了」。但开启文件推导后，卸载通常
+        // 只是插件重载：任务应该保持「进行中」，下次启动从文件恢复后继续。
+        // 若无条件写 orphan，重载本身就会把任务标记为已结束，
+        // 「重载后继续做」的能力直接失效（实测踩过三次）。
+        if (!cfg.stateFromFile) {
+          for (const [sessionId, state] of open) {
+            writeRecord({
+              ev: "task_orphaned",
+              record_type: "orphan",
+              task_id: state.task.task_id,
+              session_id: sessionId,
+              goal: state.task.goal,
+              expected_result: state.task.expected_result,
+              start_time: state.task.start_time,
+              start_seq: state.task.start_seq,
+              closed_by: "session-end",
+            });
+          }
         }
         open.clear();
       } catch {

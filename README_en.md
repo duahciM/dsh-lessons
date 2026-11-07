@@ -1,7 +1,5 @@
-# DSH Task Retro Plugin (`dsh-lessons`)
-[简体中文](README.md)
+# DSH Metacognition Plugin (`dsh-lessons`)
 
-(translated by Gemini)
 > Effectiveness is not guaranteed — see Section 4 for what was actually measured.
 >
 > Enables the Agent to conduct post-task retrospectives, distill reusable lessons, and inject them into subsequent tasks by scope. Tool and failure events are also persisted for later analysis.
@@ -165,13 +163,13 @@ Both the raw count and the adjusted effective count are preserved. Looking only 
 
 ### 5.1 Installation
 
-#### one-click from the DSH UI
+#### Option A: one-click from the DSH UI (recommended)
 
 1. Open DSH and go to **Plugins → Add plugin**.
-2. Enter `dsh-lessons` (or the repository URL `https://github.com/dauhciM/dsh-lessons`), then click **Install**.
+2. Enter `dsh-lessons` (or the repository URL `https://github.com/duahciM/dsh-lessons`), then click **Install**.
 3. Once installed, click **Enable now**.
 
-#### command line
+#### Option B: command line
 
 ```sh
 dsh plugin --profile web add dsh-lessons

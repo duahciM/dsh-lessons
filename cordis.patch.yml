@@ -10,6 +10,16 @@
         injectReflection: true
         recordEvents: true
         taskBoundaryHints: true
+        # 任务状态从 tasks.jsonl 推导（默认开启）。
+        # 开启后：插件重载 / 进程重启不会丢失「进行中的任务」「可反思的任务」
+        # 「哪些会话开过任务」「已提醒几次」——这些都从文件重建。
+        # 关闭则退回纯内存态（重载即丢，用于对照实验）。
+        stateFromFile: true
+        # 是否把「决策环境快照」渲染进反思材料（默认开启）。
+        # 记录本身始终写入 task_open.environment，与本开关无关（供事后审计）。
+        # 开启：反思时不用回翻 system prompt，近因下更易判断「有没有遵循」；
+        # 关闭：省约 800 token/次反思（实测 11 条经验 ≈ 1986 字符）。
+        environmentInBrief: true
         lessons:
           enabled: true
           sectionName: 'lessons:accumulated'
@@ -20,3 +30,15 @@
             global: true
             session: true
             reflection: true
+          # ── 缓存友好：攒批 + 即时通知 ──────────────────────────────
+          # 实测（2026-11-07）：plugin 类注入命中率 >= 99.6%，
+          # system/message 变更命中率 <= 0.7%。所以新反思先走即时通知
+          # （零缓存代价），攒够阈值才改一次 system prompt。
+          # 关闭 batching 后 section 恢复实时反映全部条目（每条反思都会重算）。
+          batching: true
+          # 仅在 batching 开启时有效；关闭 batching 时自动失效（避免重复）
+          instantNotice: true
+          # 待提交条数达到该值即提交；0 = 只看 token 阈值
+          commitEvery: 8
+          # 待提交 token 阈值（按字符数/3 粗估）；0 = 不按 token 判断
+          commitEveryTokens: 0

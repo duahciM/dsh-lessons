@@ -240,11 +240,103 @@ Confidence: high
 
 ---
 
+## 八、缓存友好改造：攒批 + 即时通知（2026-11-07）
+
+### 8.1 动机
+
+第五节已实测：**任何 `system/message` 变更都会清空缓存**（8/8 样本命中率 ≤0.7%，多数 `cached=0`）。
+而 lessons 段每次内容变化都会触发一次 `system/message` 重写 —— 于是每条反思都等于一次全量重算。
+
+### 8.2 补充实测：哪些变化不吃缓存
+
+用 `cache-probe/controlled.mjs` 对会话日志做**单一触发归因**（排除混杂样本）：
+
+| 触发类型 | 样本 | 均值 | 中位数 | 最低 |
+|---|---:|---:|---:|---:|
+| plugin（插件注入） | 22 | 99.9% | 99.9% | 99.6% |
+| user | 5 | 99.1% | 99.9% | 96.2% |
+| tools（工具结果） | 948 | 99.4% | 99.9% | 0.1% |
+| developer | 21 | 62.1% | 98.9% | 0.0% |
+| **system** | **8** | **0.1%** | **0.0%** | **0.0%** |
+
+结论：**缓存是前缀匹配，不是整条请求哈希。**
+末尾追加（plugin / user / tools）几乎零代价；开头的 `system/message` 一变，整段作废。
+
+> 一次 plugin 注入实测：`cached=499456 / uncached=358`（99.9%）。
+> 作为对照，一次 system 变更的 `uncached` 约 50 万。**比值约 1400:1。**
+
+### 8.3 机制
+
+```
+task_reflect
+  ├─ 写入 reflection 记录（recorded_at = 现在）
+  ├─ 与水位的差 = pending
+  ├─ 未达阈值 → 发一条 plugin 通知（零缓存代价，agent 立刻看到）
+  └─ 达到阈值 → 追加 commit 记录推进水位
+                    ↓
+              下一次装配才重算 section（一次全量）
+```
+
+**水位**（`record_type: "commit"`，记 `committed_at`）：
+
+- 只有 `recorded_at <= committed_at` 的反思进入 system prompt
+- 没有 commit 记录时水位为 `Infinity`（向后兼容：既有安装行为不变）
+- 首次启用攒批会写一条 `reason: "seed"` 的记录，把「此刻之前已有的反思」固定为已提交
+- pending 由**文件推导**（`recorded_at > committed_at`），不依赖内存 → 重启不丢
+
+### 8.4 配置
+
+```yaml
+lessons:
+  batching: true          # 攒批总开关；关闭则 section 实时反映全部条目
+  instantNotice: true     # 即时通知；仅在 batching 开启时有效
+  commitEvery: 8          # 待提交条数阈值
+  commitEveryTokens: 0    # 待提交 token 阈值（0 = 不按 token 判断）
+```
+
+四种组合的实测行为：
+
+| batching | instantNotice | 行为 |
+|---|---|---|
+| false | — | 不写 seed、不发通知、section 实时（每条反思都会重算） |
+| true | false | 写 seed、不发通知、未达阈值不进 section |
+| true | true | 写 seed、逐条即时通知、未达阈值不进 section（**默认**） |
+| true 但阈值为 0 | — | 等同关闭攒批（没有提交点） |
+
+### 8.5 验收
+
+离线 + 集成共 **59 个用例**通过（`D:/LLM/cache-probe/`）：
+
+- `test-batching.mjs`（29）水位解析、pending 推导、阈值判定、通知渲染、commit 记录不污染条目
+- `test-integration.mjs`（15）真实 `apply()`：seed → 即时通知 → 未提交不进 section → 攒满提交 → section 更新 → 新反思重新 pending
+- `test-toggles.mjs`（15）四种开关组合
+
+真实运行时（阈值临时设为 1）：
+
+```
+task_reflect → <lessons_committed count="2" reason="count>=1">
+诊断        → {"kind":"commit","count":2}
+section     → 1 条 → 3 条（global:1, reflection:2）
+```
+
+### 8.6 已知限制
+
+| # | 限制 |
+|---|---|
+| 1 | 即时通知只在 `task_reflect` 后被触发；若模型不调用 `task_reflect`，反思链断裂 |
+| 2 | 通知内容会进入对话历史，`deprecated` 的旧通知无法撤回（与 system prompt 不同） |
+| 3 | 水位按时间戳比较；同一毫秒内写入的反思会被归入同一侧 |
+| 4 | 提交后 section 变化仍会触发一次全量重算 —— 攒批只是把频率从「每条」降到「每 N 条」 |
+
+---
+
 ## 附录：文件
 
 | 文件 | 作用 |
 |---|---|
-| `lib/lessons.js` | 解析、身份/墓碑、mtime 缓存、渲染 |
-| `selftest-lessons.mjs` | 32 个用例 |
-| `index.js` | `systemPrompt.section` 注册 + 诊断 |
-| `data/lessons-render.jsonl` | 内容变化诊断（本阶段验收证据） |
+| `lib/lessons.js` | 解析、身份/墓碑、mtime 缓存、水位过滤、渲染 |
+| `lib/instant-notice.js` | 即时通知渲染、攒批阈值判定 |
+| `index.js` | `systemPrompt.section` 注册 + 攒批 + 诊断 |
+| `data/lessons-render.jsonl` | 内容变化 / instant / commit 诊断 |
+| `D:/LLM/cache-probe/` | 缓存实验脚本与 59 个用例 |
+

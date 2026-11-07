@@ -1,4 +1,4 @@
-# DSH任务复盘插件（dsh-lessons）
+# DSH 元认知插件（dsh-lessons）
 （效果不保证）
 
 [English](README_en.md)
@@ -67,7 +67,58 @@ Agent可能在不同任务中重复犯错,当前会话结束后,相关上下文�
 - **结构检查器**：检查 `conflicts` / `promoted_from` 引用、scope 和 subject/session_id 的一致性，以及非 `reflection` 条目是否声明 `boundary`。
 - **来源和主体分离**：`source` 由 Agent 自述经验最初从何而来，`task_id`、`session_id`、时间等机器侧字段独立记录。`source_text` 用于溯源，不参与记忆注入。
 
-### 2.4 分工原则
+### 2.4 决策环境记录
+
+反思材料不能只记录**行为**，还要记录行为发生时的**环境/约束**。否则模型被要求判断
+「我做得怎么样」，却看不到「我当时被要求按什么做」。
+
+因此 `task_start` 会把**此刻实际生效的经验冻结成快照**写进 `task_open` 记录：
+
+```json
+{"record_type":"open","task_id":"task-…","environment":{
+  "taken_at": 1794…, "committed_at": 1794…, "count": 3, "truncated": false,
+  "lessons":[{"id":"t1#0","scope":"global","confidence":"high",
+              "pattern":"…","correction":"…","applies_when":"…"}]}}
+```
+
+**为什么在开始处快照，而不是反思时重算**：
+
+| 事后重算的问题 | 快照的保证 |
+|---|---|
+| 后续修改经验，历史任务当时看到的约束被改写 | 修改不影响已冻结的快照 |
+| `deprecated` 的条目从历史里消失 | 仍出现在它参与过的任务记录里 |
+| 分不清「当时注入的」与「事后新增的」 | `taken_at` / `committed_at` 划定边界 |
+| 无法追查某条经验的决策影响 | `task_close` 记录带 `environment_ids`，可按 id 反查 |
+
+反思材料中的呈现：
+
+```text
+DECISION ENVIRONMENT (lessons in effect when this task started; 2 total):
+  [E1] (global, high) 修改前先读完整文件
+        do instead: 先读再改
+        applies when: 编辑未读过的文件时
+  [E2] ...
+
+These were the rules in force when you started. Judge whether any of them applied,
+and whether you actually followed them — not whether they still seem right now.
+```
+
+> 这是**决策轨迹层**的职责，不是记忆治理层的：错的不是经验怎么存、怎么分类，
+> 而是反思时缺少了当时的约束条件。
+
+#### 记录与渲染是两件事
+
+| | 是否受开关控制 | 成本 |
+|---|---|---|
+| **记录**（`task_open.environment`） | 否，**始终写入** | 约 4.3 KB/任务（仅落盘，不占上下文） |
+| **渲染**（材料里的 `DECISION ENVIRONMENT` 段） | `environmentInBrief`，默认 `true` | 约 800 token/次反思（实测 11 条 ≈ 1986 字符） |
+
+记录保证历史可审计；渲染解决「反思时不用回翻几十万 token 去 system prompt 找约束」。
+
+两者可以独立取舍：关掉 `environmentInBrief` 后，材料不再重复这些经验（模型仍能在
+system prompt 或此前的即时通知里看到它们），但快照照样落盘、照样可按 id 反查。
+
+### 2.5 分工原则
 
 > 插件负责记录、结构校验与注入流程；模型负责语义分类、冲突判断和任务反思。
 
@@ -133,6 +184,11 @@ Agent可能在不同任务中重复犯错,当前会话结束后,相关上下文�
 
 **注意：这项提示词改动尚未验证。** 
 
+20261107，修正提醒措辞的**自相矛盾**：边界段写着「Never do the work first and declare the task afterwards」，
+而旧提醒却要求「请现在用 task_start 声明」——同一份上下文里两份相反的指令，模型照做只会得到空的决策窗口。
+现改为**只向前看**：明确告知「本次不需要事后补开」，把要求限定在下一个任务的第一项动作。
+同时把 `missedTaskMinCalls` 由 3 提到 8：正常的多步任务动辄十几次调用，阈值 3 会让提醒变成噪声。
+
 ### 4.4 工具失败计数的口径
 
 原始「工具失败」计数包含大量假阳性：例如 `grep` 没有匹配、`ls` 路径不存在，都可能通过非零退出码表达正常的查询结果。实验记录区分：
@@ -149,13 +205,13 @@ Agent可能在不同任务中重复犯错,当前会话结束后,相关上下文�
 
 ### 5.1 安装
 
-#### 在 DSH 界面中安装
+#### 方式 A：在 DSH 界面中一键安装（推荐）
 
 1. 打开 DSH，进入 **插件 → 添加插件**。
-2. 输入 `dsh-lessons`（或填入仓库地址 `https://github.com/dauhciM/dsh-lessons`），点击 **安装**。
+2. 输入 `dsh-lessons`（或填入仓库地址 `https://github.com/duahciM/dsh-lessons`），点击 **安装**。
 3. 安装完成后点击 **立即启用**。
 
-#### 命令行安装
+#### 方式 B：命令行安装
 
 ```sh
 dsh plugin --profile web add dsh-lessons
@@ -179,6 +235,7 @@ dsh plugin --profile web add dsh-lessons
         taskBoundaryHints: true                    # 注入任务边界提示
         injectReflection: true                     # task_end 时注入复盘材料
         recordEvents: true                         # 落盘工具调用与失败（不注入）
+        stateFromFile: true                        # 任务状态从文件推导（见 5.2.1）
         lessons:
           enabled: true
           maxLessons: 0                            # 0 = 全部注入
@@ -187,7 +244,39 @@ dsh plugin --profile web add dsh-lessons
             global: true
             session: true
             reflection: true
+          batching: true                           # 攒批（见 5.2.2）
+          instantNotice: true                      # 新反思即时提示
+          commitEvery: 8                           # 攒够 N 条才改一次 system prompt
+          commitEveryTokens: 0                     # 或按 token 阈值（0 = 不看）
 ```
+
+#### 5.2.1 `stateFromFile`：任务状态从文件推导（默认开）
+
+进行中的任务、可反思的任务、哪些会话开过任务、已提醒几次 —— 这些原本是内存态，
+插件重载或进程重启就丢，会导致：
+
+- 进行中的任务断裂（`task_end` 报 `no open task`，无法反思）
+- 「本会话开过任务」被遗忘 → 每回合误报「没有声明任何任务」
+- 提醒次数归零 → 超过上限仍继续提醒
+
+开启后，启动时从 `tasks.jsonl` 重建这四类事实。关闭则退回纯内存态（用于对照实验）。
+
+#### 5.2.2 `batching` + `instantNotice`：缓存友好
+
+**实测依据**：`plugin:` 类注入的缓存命中率中位数 **99.9%**；而 `system/message`
+变更的中位数是 **0.0%**（一次约 50 万 token 重算）。缓存按前缀匹配——末尾追加几乎免费，
+开头的系统提示一变则整段作废。
+
+因此：
+
+```
+task_reflect → 写入反思
+             → 未达阈值：发一条 plugin 通知（零缓存代价，立刻可见）
+             → 达到阈值：推进「提交水位」，system prompt 才重算一次
+```
+
+- `batching: false` → section 实时反映全部条目，每条反思都会重算
+- `instantNotice` 仅在 `batching` 开启时有效（否则内容与 section 重复）
 
 ### 5.3 日常使用
 
@@ -203,7 +292,8 @@ node tools/lessons.mjs check                     # 结构检查（引用/状态/
 node tools/lessons.mjs add --scope global --pattern "…" --correction "…" \
      --applies-when "…" --boundary "为什么属于这一层"
 node tools/lessons.mjs move <id> --to global     # 晋升（状态迁移，不复制）
-node tools/lessons.mjs remove <id>               # 墓碑删除
+node tools/lessons.mjs remove <id>               # 只预览，不写入（exit 3 = 等待审批）
+node tools/lessons.mjs remove <id> --yes         # 确认后真正写墓碑
 node tools/deprecate.mjs <id> --reason "…"      # 不再推荐但保留历史
 node tools/deprecate.mjs --list
 ```
@@ -221,7 +311,7 @@ node tools/lessons.mjs check   # 引用完整性 / 状态自洽 / 边界是否�
 ## 六、文件结构
 
 ```text
-index.js                 三个工具 + system prompt 注入 + 事件落盘
+index.js                 插件入口：三个工具 + system prompt 注入 + 事件落盘
 lib/
   task-model.js          任务记录与参数校验
   task-context.js        决策轨迹截取（不含工具调用清单）
