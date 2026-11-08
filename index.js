@@ -697,7 +697,7 @@ export function apply(ctx, rawConfig) {
 
   /** 决策环境快照的规模上限：避免单条任务记录无限膨胀。 */
   const ENV_MAX_LESSONS = 12;
-  const ENV_FIELD_LIMITS = { pattern: 200, correction: 240, applies_when: 120 };
+  const ENV_FIELD_LIMITS = { problem: 200, attempted: 200, correction: 240, applies_when: 120, omitted: 100 };
 
   function clipEnv(value, limit) {
     const flat = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -723,20 +723,54 @@ export function apply(ctx, rawConfig) {
       if (batchingOn) committedAt = parseCommitState(lessonStore.readTaskText());
       const { lessons } = lessonStore.read(sessionId, cfg.lessons.scopes, committedAt);
       const all = Array.isArray(lessons) ? lessons : [];
-      const shown = all.slice(0, ENV_MAX_LESSONS).map((l) => ({
+
+      // ── 截断策略 ──────────────────────────────────────────────────────
+      // 旧实现是 `all.slice(0, 12)`：按插入顺序取前 12 条。实测发现被丢的
+      // 全是**最新、且全是 high** 的条目 —— 因为 reflection 按写入顺序排列，
+      // 越新的越靠后。结果是「最近学到的、最可信的」被系统性丢弃，
+      // 只有 oldest 12 条留在快照里，这正是最不该留的那批。
+      //
+      // 新策略分两步：
+      //   1. 排序：high 优先，同级内新的在前（最近学的更可能适用于当前任务）
+      //   2. 正文按「预算」截断：先给全部条目各留 id+problem 一行，
+      //      剩余预算才用来补 attempted / correction / applies_when
+      //
+      // 这样即使条目超出上限，也仍能列出**全部 id**（追查依据不丢），
+      // 只是每条的信息量下降。
+      const sorted = [...all].sort((a, b) => {
+        const rank = { high: 0, medium: 1, low: 2 };
+        const ra = rank[a.confidence] ?? 1;
+        const rb = rank[b.confidence] ?? 1;
+        if (ra !== rb) return ra - rb;
+        return (b.source?.at ?? 0) - (a.source?.at ?? 0);
+      });
+      const considered = sorted.slice(0, ENV_MAX_LESSONS);
+
+      const shown = considered.map((l) => ({
         id: l.id,
         scope: l.scope,
         confidence: l.confidence,
-        pattern: clipEnv(l.pattern, ENV_FIELD_LIMITS.pattern),
+        problem: clipEnv(l.problem, ENV_FIELD_LIMITS.problem),
+        ...(l.attempted ? { attempted: clipEnv(l.attempted, ENV_FIELD_LIMITS.attempted) } : {}),
         correction: clipEnv(l.correction, ENV_FIELD_LIMITS.correction),
         applies_when: clipEnv(l.applies_when, ENV_FIELD_LIMITS.applies_when),
       }));
+
+      // 未被纳入正文的条目：至少保留 id + problem，供「是否参与过决策」追溯。
+      // 不放进 lessons[]（那会撑大材料），而是单独一个精简列表。
+      const omitted = sorted.slice(ENV_MAX_LESSONS).map((l) => ({
+        id: l.id,
+        confidence: l.confidence,
+        problem: clipEnv(l.problem, ENV_FIELD_LIMITS.omitted),
+      }));
+
       return {
         taken_at: Date.now(),
         committed_at: committedAt === Number.POSITIVE_INFINITY ? null : committedAt,
         count: all.length,
-        truncated: all.length > shown.length,
+        truncated: omitted.length > 0,
         lessons: shown,
+        ...(omitted.length > 0 ? { omitted } : {}),
       };
     } catch (e) {
       warn(`[lessons] environment snapshot failed: ${String(e)}`);
@@ -845,6 +879,131 @@ export function apply(ctx, rawConfig) {
   if (tools === undefined) {
     warn("[lessons] tools service unavailable; task tools not registered");
     return;
+  }
+
+  /**
+   * 按 lesson id 展开完整来源。
+   *
+   * 设计原则：**按需查询，不主动注入**。
+   * 决策环境快照里每个条目都带 id，但 id 背后的完整来源（任务目标、结果、
+   * 当时的决策轨迹区间、当时生效的其他经验）只在 agent 主动要看时才展开。
+   *
+   * 数据本来就在 tasks.jsonl 里，这里只做 join：
+   *   lesson_id → 前缀即 task_id → open/close/reflection 三段记录
+   */
+  function lookupLesson(lessonId) {
+    const text = safe(() => lessonStore.readTaskText(), "");
+    if (!text) return { ok: false, error: "no task records available" };
+
+    const rows = [];
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        rows.push(JSON.parse(trimmed));
+      } catch {
+        /* 坏行跳过 */
+      }
+    }
+
+    // 1. 定位该 lesson 本身（可能在 reflection 记录里）
+    let found;
+    let ownerTaskId = null;
+    for (const r of rows) {
+      if (r.record_type !== "reflection") continue;
+      for (const l of r.lessons ?? []) {
+        const id = l.lesson_id ?? (r.task_id ? `${r.task_id}#0` : null);
+        if (id !== lessonId) continue;
+        found = { ...l, assessment: r.assessment, recorded_at: r.recorded_at, session_id: r.session_id };
+        ownerTaskId = r.task_id ?? null;
+        break;
+      }
+      if (found) break;
+    }
+
+    // 手工维护的条目不在 tasks.jsonl，交给调用方用 list/show 查
+    if (!found) {
+      // lesson id 常形如 <task_id>#<n>，前缀即来源任务
+      const hash = lessonId.indexOf("#");
+      const guess = hash > 0 ? lessonId.slice(0, hash) : null;
+      if (guess && rows.some((r) => r.task_id === guess)) {
+        ownerTaskId = guess;
+      } else {
+        return { ok: false, error: `unknown lesson id "${lessonId}"` };
+      }
+    }
+    if (!ownerTaskId) {
+      const hash = lessonId.indexOf("#");
+      ownerTaskId = hash > 0 ? lessonId.slice(0, hash) : null;
+    }
+    if (!ownerTaskId) return { ok: false, error: `cannot resolve source task for "${lessonId}"` };
+
+    // 2. 取该任务的 open / close / reflection
+    const open = rows.find((r) => r.record_type === "open" && r.task_id === ownerTaskId);
+    const close = rows.find((r) => r.record_type === "close" && r.task_id === ownerTaskId);
+    if (!open && !close) return { ok: false, error: `source task "${ownerTaskId}" not found` };
+
+    // 3. 当时生效的经验（来自 open 记录的快照）
+    //    快照分两处：lessons[]（详细）与 omitted[]（只有 id+problem）。
+    //    两处都要算，否则「count 说 18 条，只列得出 12 条」。
+    const env = open?.environment ?? null;
+    const siblings = [
+      ...(env?.lessons ?? []),
+      // omitted 里的条目信息更少（只有 problem），但同样在生效，不能丢。
+      ...(env?.omitted ?? []),
+    ]
+      .filter((l) => l.id !== lessonId)
+      // 兼容：快照可能写于字段拆分之前（那时只有 pattern）。
+      .map((l) => ({
+        id: l.id,
+        confidence: l.confidence,
+        problem: l.problem ?? l.pattern ?? "(no description recorded)",
+      }));
+    const envIds = Array.isArray(close?.environment_ids) ? close.environment_ids : [];
+
+    return {
+      ok: true,
+      lesson_id: lessonId,
+      lesson: found
+        ? {
+            problem: found.problem ?? found.pattern ?? null,
+            attempted: found.attempted ?? null,
+            correction: found.correction ?? null,
+            applies_when: found.applies_when ?? null,
+            confidence: found.confidence ?? null,
+            assessment: found.assessment ?? null,
+          }
+        : null,
+      source_task: {
+        task_id: ownerTaskId,
+        goal: open?.goal ?? close?.goal ?? null,
+        expected_result: open?.expected_result ?? close?.expected_result ?? null,
+        status: close?.status ?? (open ? "open" : null),
+        result: close?.result ?? null,
+        start_seq: open?.start_seq ?? close?.start_seq ?? null,
+        end_seq: close?.end_seq ?? null,
+        start_time: open?.start_time ?? null,
+        end_time: close?.end_time ?? null,
+        tool_failures: close?.tool_failures ?? null,
+        // 决策轨迹的会话区间：用它去会话日志取真实对话
+        timeline_hint:
+          close?.start_seq != null && close?.end_seq != null
+            ? `session events seq ${close.start_seq}..${close.end_seq}`
+            : null,
+      },
+      // 任务开启那一刻还有哪些经验在生效（可用于判断「是不是只有我这一条」）
+      // 只详细展开前 10 条，其余仅列 id：不丢可追溯性，也不让输出无限膨胀。
+      environment_at_start: env
+        ? {
+            taken_at: env.taken_at,
+            count: env.count,
+            others: siblings.slice(0, 10),
+            omitted_ids: siblings.slice(10).map((l) => l.id),
+          }
+        : null,
+      // 关闭时记录的完整 id 列表（可用于核对快照是否被截断）
+      environment_ids: envIds.slice(0, 50),
+    };
   }
 
   const START_OUTPUT = {
@@ -1136,15 +1295,22 @@ export function apply(ctx, rawConfig) {
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["pattern", "correction", "applies_when"],
+            required: ["problem", "correction", "applies_when"],
             properties: {
-              pattern: {
+              problem: {
                 type: "string",
-                description: "The recurring working-method issue the timeline actually shows.",
+                description:
+                  "What actually happened — the observable symptom or mistake, e.g. 'the file read back as mojibake'. Describe the event, not the fix.",
+              },
+              attempted: {
+                type: "string",
+                description:
+                  "What you did about it at the time, e.g. 'decoded again without changing the encoding'. State the action plainly; do not evaluate it here.",
               },
               correction: {
                 type: "string",
-                description: "What to do differently next time.",
+                description:
+                  "What should be done instead, e.g. 'read with UTF-8'. This must not be narrower than problem: if the fix says less than the problem describes, one of them is wrong.",
               },
               applies_when: {
                 type: "string",
@@ -1284,6 +1450,81 @@ export function apply(ctx, rawConfig) {
       }
 
       return { task_id: v.taskId, lessons_recorded: written.length };
+    },
+  });
+
+  // ── 按需查询：经验的完整来源 ──────────────────────────────────────────────
+  // 刻意不做主动注入。决策材料和 system prompt 里只给 id，
+  // 想追查时由 agent 自己决定调用——避免每次都把历史塞进上下文。
+  tools.register({
+    name: "lessons_lookup",
+    description:
+      "Trace one recorded lesson back to the task that produced it: what the task was trying to achieve, what actually happened, and which other lessons were in force at that moment. Use this when a lesson's applicability or origin is unclear, or when you need to judge whether it still holds. Read-only; it records nothing.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["lesson_id"],
+      properties: {
+        lesson_id: {
+          type: "string",
+          description:
+            "The exact lesson id, as shown in the decision environment ([E1] etc.) or in the system prompt's Accumuated Lessons.",
+        },
+      },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["found"],
+        properties: {
+          found: { type: "boolean" },
+          summary: { type: "string" },
+          error: { type: "string" },
+        },
+      },
+      render: (_args, value) => [{ type: "text", text: value.summary ?? value.error ?? "" }],
+    },
+    execute(args) {
+      const id = typeof args?.lesson_id === "string" ? args.lesson_id.trim() : "";
+      if (!id) throw new Error("lesson_id is required");
+
+      const r = lookupLesson(id);
+      if (!r.ok) return { found: false, error: r.error };
+
+      const L = [];
+      L.push(`LESSON ${r.lesson_id}`);
+      if (r.lesson) {
+        L.push(`  problem:     ${r.lesson.problem ?? "(unknown)"}`);
+        if (r.lesson.attempted) L.push(`  attempted:   ${r.lesson.attempted}`);
+        if (r.lesson.correction) L.push(`  correction:  ${r.lesson.correction}`);
+        if (r.lesson.applies_when) L.push(`  applies when: ${r.lesson.applies_when}`);
+        if (r.lesson.confidence) L.push(`  confidence:  ${r.lesson.confidence}`);
+        if (r.lesson.assessment) L.push(`  assessment:  ${r.lesson.assessment}`);
+      } else {
+        L.push("  (manually maintained entry; body is in lessons.jsonl — use the CLI `show`)");
+      }
+      L.push("");
+      const t = r.source_task;
+      L.push(`SOURCE TASK ${t.task_id}`);
+      if (t.goal) L.push(`  goal:     ${t.goal}`);
+      if (t.expected_result) L.push(`  expected: ${t.expected_result}`);
+      if (t.status) L.push(`  status:   ${t.status}`);
+      if (t.result) L.push(`  result:   ${t.result}`);
+      if (t.timeline_hint) L.push(`  timeline: ${t.timeline_hint}`);
+
+      if (r.environment_at_start) {
+        const e = r.environment_at_start;
+        L.push("");
+        L.push(`OTHER LESSONS IN FORCE WHEN THAT TASK STARTED (${e.count} total):`);
+        if (e.others.length === 0) L.push("  (none besides this one)");
+        for (const o of e.others) L.push(`  [${o.id}] (${o.confidence}) ${o.problem}`);
+        if (e.omitted_ids?.length) {
+          L.push(`  (+${e.omitted_ids.length} more in force, not expanded: ${e.omitted_ids.join(", ")})`);
+        }
+      }
+
+      return { found: true, summary: L.join("\n") };
     },
   });
 
