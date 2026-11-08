@@ -1,10 +1,12 @@
 # DSH Metacognition Plugin (`dsh-lessons`)
 
+（sorry I did't write the new EN readme yet）
+
 > Effectiveness is not guaranteed — see Section 4 for what was actually measured.
 >
 > Enables the Agent to conduct post-task retrospectives, distill reusable lessons, and inject them into subsequent tasks by scope. Tool and failure events are also persisted for later analysis.
 >
-> Version `0.4.0` · Runtime Environment: DeepSeek Harness `0.2.1-rc.5` · Single-package installation
+> Runtime Environment: DeepSeek Harness `0.2.1-rc.5` · Single-package installation
 
 ---
 
@@ -143,7 +145,6 @@ The legacy reminder mechanism checked at the end of a turn: if no task had ever 
 
 The limitation is that the reminder arrives too late: a retroactively opened task can only capture events occurring after the reminder, failing to recover the earlier decision trajectory. As a result, one session's retrospective material contained only 5 events.
 
-On `2026-11-04`, the task boundary section in the system prompt was updated to mandatory wording: requiring `task_start` to be the very first action of a task—prior to reading files, running commands, searching, or editing—and requiring `task_end` to be called once the task outcome is reached, regardless of success or failure.
 
 **Note: This prompt change has not yet been empirically validated.**
 
