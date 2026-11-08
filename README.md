@@ -1,4 +1,4 @@
-# DSH 元认知插件（dsh-lessons）
+# DSH 任务复盘插件（dsh-lessons）
 （效果不保证）
 
 [English](README_en.md)
