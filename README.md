@@ -207,6 +207,43 @@ DECISION ENVIRONMENT (lessons in effect when this task started; 20 total, 12 det
 两者可以独立取舍：关掉 `environmentInBrief` 后，材料不再重复这些经验（模型仍能在
 system prompt 或此前的即时通知里看到它们），但快照照样落盘、照样可按 id 反查。
 
+#### 复盘是思考，不是汇报（`silentReflection`，默认开）
+
+反思材料会让模型「还原决策过程」。不约束的话，模型往往把这当成一份要交的作业：先写
+一大段分点回复，再去调 `task_reflect`。
+
+实测（本会话 78 次 `task_end` → `task_reflect` 配对）：
+
+| 指标 | 数值 |
+|---|---|
+| 复盘位置有对外发言 | 50%（39/78） |
+| 发言长度 | 平均 784 字符，最长 6660 |
+
+这段发言**不是写入通道**：`buildReflectionRecord` 只接收 `task_reflect` 的参数，
+模型在工具之外说的话没有任何代码路径能进入记录（`test-silent.mjs` 逐字段验证过）。
+但它也不是零成本：
+
+| 影响 | 说明 |
+|---|---|
+| 输出 token | 同一份分析付两次钱——一次在正文，一次在 `task_reflect` 的结构化字段里 |
+| 决策轨迹污染 | 若模型先开了新任务、再补做上一个任务的反思，这段发言会落在**新任务**的窗口内，被当成该任务的 `ASSISTANT` 条目收进它的反思材料 |
+
+所以开启 `silentReflection` 后，材料末尾改为要求：
+
+```text
+Do this as internal reasoning, not as a visible reply. The six questions above are
+prompts for your own thinking; do not answer them in your response text.
+
+Call task_reflect directly, with <task_id> as the task_id.
+After that, reply with at most one short line saying whether the task succeeded —
+no restatement of the analysis, no per-question section, no bullet summary.
+If something genuinely needs the user's attention (a decision only they can make,
+a risk they must know), say just that one thing and nothing else.
+```
+
+留了一个出口：真的需要用户拍板的事仍然要说，而不是为了安静而瞒报。关闭该开关即恢复
+原来的「说完再记录」措辞。
+
 ### 2.5 分工原则
 
 > 插件负责记录、结构校验与注入流程；模型负责语义分类、冲突判断和任务反思。
@@ -319,6 +356,7 @@ dsh plugin --profile web add dsh-lessons
         injectReflection: true                     # task_end 时注入复盘材料
         recordEvents: true                         # 落盘工具调用与失败（不注入）
         stateFromFile: true                        # 任务状态从文件推导（见 5.2.1）
+        silentReflection: true                     # 复盘只在思维链里做，不写成回复（见 2.4）
         lessons:
           enabled: true
           maxLessons: 0                            # 0 = 全部注入

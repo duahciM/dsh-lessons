@@ -1,0 +1,10 @@
+# Local helper scripts (not part of the published package)
+.push-via-api.mjs
+.compare-remote.mjs
+.sync-from-remote.mjs
+
+# Local token file
+.gh-token
+
+# Promo media (not referenced by the package)
+*.mp4

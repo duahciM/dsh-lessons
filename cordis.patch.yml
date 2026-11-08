@@ -20,6 +20,11 @@
         # 开启：反思时不用回翻 system prompt，近因下更易判断「有没有遵循」；
         # 关闭：省约 800 token/次反思（实测 11 条经验 ≈ 1986 字符）。
         environmentInBrief: true
+        # 复盘保持安静（默认开启）：要求模型把复盘放在思维链里，不要写成对外回复。
+        # 实测：50% 的复盘会先写一段对外文本（平均 784 字符，最长 6660）。
+        # 这段文本不进入反思记录（记录只读 task_reflect 的参数），
+        # 但会作为 ASSISTANT 条目落进之后某个任务的决策轨迹。
+        silentReflection: true
         lessons:
           enabled: true
           sectionName: 'lessons:accumulated'

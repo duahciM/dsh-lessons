@@ -103,6 +103,19 @@ const DEFAULTS = {
    */
   environmentInBrief: true,
   /**
+   * 复盘保持安静（默认开启）：要求模型把复盘放在思维链里，不要写成对外回复。
+   *
+   * 实测（本会话 78 次 task_end→task_reflect 配对）：
+   *   · 50% 的复盘先写一段对外文本，平均 784 字符，最长 6660；
+   *   · 这段文本不进入反思记录 —— buildReflectionRecord 只读 task_reflect 的参数；
+   *   · 但若它落在后续某个任务的 [start_seq, end_seq] 窗口内，会被 sliceDecisionTrail
+   *     当成那个任务的 ASSISTANT 条目收进反思材料。
+   *
+   * 所以对外复述既不是写入通道，也不是零成本：它只是把同一份分析付两次钱，
+   * 并给后面的任务轨迹掺入不属于它的内容。关闭后恢复旧行为。
+   */
+  silentReflection: true,
+  /**
    * 任务状态从 `tasks.jsonl` 推导（默认开启）。
    *
    * 进行中任务、可反思任务、「本会话是否开过任务」、提醒次数原本都是内存态，
@@ -187,6 +200,7 @@ function readConfig(raw) {
     if (Number.isSafeInteger(raw.fsyncEvery) && raw.fsyncEvery > 0) cfg.fsyncEvery = raw.fsyncEvery;
     if (typeof raw.injectReflection === "boolean") cfg.injectReflection = raw.injectReflection;
     if (typeof raw.environmentInBrief === "boolean") cfg.environmentInBrief = raw.environmentInBrief;
+    if (typeof raw.silentReflection === "boolean") cfg.silentReflection = raw.silentReflection;
     if (typeof raw.stateFromFile === "boolean") cfg.stateFromFile = raw.stateFromFile;
     if (typeof raw.recordEvents === "boolean") cfg.recordEvents = raw.recordEvents;
     if (typeof raw.taskBoundaryHints === "boolean") cfg.taskBoundaryHints = raw.taskBoundaryHints;
@@ -1249,6 +1263,7 @@ export function apply(ctx, rawConfig) {
               task: record,
               trail,
               environment: cfg.environmentInBrief ? state.task.environment : null,
+              silent: cfg.silentReflection,
             })
           : undefined;
       if (brief) {
