@@ -432,7 +432,7 @@ node tools/lessons.mjs check   # 引用完整性 / 状态自洽 / 边界是否�
 ## 六、文件结构
 
 ```text
-index.js                 插件入口：三个工具 + system prompt 注入 + 事件落盘
+index.js                 插件入口：四个工具 + system prompt 注入 + 事件落盘
 lib/
   task-model.js          任务记录与参数校验
   task-context.js        决策轨迹截取（不含工具调用清单）
