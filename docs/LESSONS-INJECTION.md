@@ -336,5 +336,4 @@ section     → 1 条 → 3 条（global:1, reflection:2）
 | `lib/lessons.js` | 解析、身份/墓碑、mtime 缓存、水位过滤、渲染 |
 | `lib/instant-notice.js` | 即时通知渲染、攒批阈值判定 |
 | `index.js` | `systemPrompt.section` 注册 + 攒批 + 诊断 |
-| `data/lessons-render.jsonl` | 内容变化 / instant / commit 诊断 |
 
