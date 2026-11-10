@@ -258,7 +258,7 @@ a risk they must know), say just that one thing and nothing else.
 |---|---|---|
 | 1 | 任务边界仍依赖模型遵循提示并调用 `task_start` / `task_end` | 当前提示要求 `task_start` 必须是任务第一项动作，但没验证，漏开任务仍会导致决策轨迹缺失 |
 | 2 | 语义判断由模型负责 | 模型仍然可能把经验分错层、写出空泛的 `boundary`，或错误声明重复/冲突，检查器无法判断这些语义问题 |
-| 3 | 三层共用一个 system prompt section | 任一层的注入内容变化都会改变该 section，并触发一次全量提示词缓存重算，实测大约 69 万 token（可能更多，测试样本不够多），之后请求恢复缓存命中 |
+| 3 | 三层共用一个 system prompt section | 任一层的注入内容变化都会改变该 section，并触发一次全量提示词缓存重算，实测大约 69 万 token（数字不固定，看个人使用），之后请求恢复缓存命中 |
 | 4 | 不做自动冲突解决 | 冲突双方继续注入，由Agent根据条件判断，这是刻意设计的 |
 | 5 | 不做语义相似度去重 | 是否属于同一经验由模型声明 `repeat` / `revise`，程序按条目 ID 和声明执行 |
 | 6 | 无 workspace 维度 | 目前不能自动按项目跨会话共享经验，需要显式晋升到 `global` 或指定的 `session` 作用域 |
