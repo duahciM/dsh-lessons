@@ -202,6 +202,5 @@ const { results } = await memory.recall(currentGoal, {
 | 文件 | 作用 |
 |---|---|
 | `lib/reflection-model.js` | 校验、渲染、记忆项构造、本地记录 |
-| `selftest-reflection.mjs` | 36 个用例 |
 | `index.js` | `task_reflect` 工具注册 + `closed` 任务索引 |
 | `lib/task-context.js` | 材料末尾的 `task_reflect` 指示 |
