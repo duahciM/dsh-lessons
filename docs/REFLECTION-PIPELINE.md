@@ -91,18 +91,6 @@ task_reflect(task_id, assessment, lessons)
 - 没有「某个工具怎么用」的字段
 - 材料末尾明确写「do not turn this into a review of tool usage」
 
-实测产出的第一条真实反思：
-
-```
-模式：整个任务窗口内只发出工具调用、没有任何对外结论，事后从记录里无法还原当时的判断依据。
-纠正：在关键节点（选定方案、遇到阻碍、改变方向）先用一句话写下判断和理由，再继续调用工具，不要留到任务结束再补。
-适用：一个任务预计要跨多个步骤或多次工具调用时
-置信：high
-结果判定：partial
-```
-
-这条正是从「材料里 ASSISTANT 条目为空」推出来的 —— 说明材料结构确实能把问题暴露给模型。
-
 ---
 
 ## 五、记忆文档形态
@@ -166,13 +154,6 @@ recall(tags:[metacog:reflection])
 | 未知 `task_id` | `Error: unknown or expired task_id "task-does-not-exist"; recently closed tasks: task-5fe7f374-…` |
 | 空 `lessons` | `"nothing generalizable beyond this task."`，本地记 `lessons: []`，记忆库不写 |
 | 同一任务多次调用 | 序号递增，`document_id` 不冲突 |
-
-本地记录：
-
-```
-reflection  task-5fe7f374-…  lessons=1 stored=1 assessment=partial
-reflection  task-5fe7f374-…  lessons=0 stored=0 assessment=aligned
-```
 
 ---
 
