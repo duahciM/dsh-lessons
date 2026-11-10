@@ -47,3 +47,28 @@
           commitEvery: 8
           # 待提交 token 阈值（按字符数/3 粗估）；0 = 不按 token 判断
           commitEveryTokens: 0
+
+        # ── 反思质量控制 ────────────────────────────────────────────────
+        # 结构化自我反对（**默认关闭**）。
+        # 开启后每条经验必须附一份可追溯的论证：claim / premises / evidence /
+        # inference / conclusion / steelman_rounds / counterexamples / scope /
+        # alternatives / revision_conditions / unresolved，以及三项有效性
+        # （演绎 / 归纳 / 前提真实性）。
+        # 反方必须**迭代补强**至少 2 轮，每轮指向论证的不同环节，
+        # 并留下 opposition_residual（反驳之后仍未驳倒的部分）——
+        # 只反驳一次就宣布通过，等于没做。
+        # 默认关闭的理由是成本：这不是"再想一遍"，而是要求把论证逐项写出来。
+        adversarialReview: false
+
+        # 先例原则（默认开启）。
+        # 挑战一条已生效的经验（relation: revise）必须引用至少一个
+        # 「在该经验生效期间发生、且结果失败」的任务 id。
+        # 三条都能机械验证：任务存在、不是 succeeded、当时该经验确实在快照里。
+        # 「与其适用条件匹配」是语义判断，程序不验证。
+        precedentGate: true
+
+        # 把先例强度（verified / counterexample 次数）渲染进 system prompt。
+        # 「验证有效」是或然性的：成功一次算一次，失败一次算一个反例。
+        # 计数来自 task_open.environment 与 task_close.status 的 join，
+        # 不需要模型自评，也不需要对照组。
+        precedentInPrompt: true

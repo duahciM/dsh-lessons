@@ -1,5 +1,5 @@
 /**
- *  任务边界层
+ * 元认知插件 · 任务边界层
  *
  * 只暴露两个模型可调用的工具：
  *   task_start  声明一个任务（目标 + 预期结果）
@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { buildTaskRecord, newTaskId, TASK_STATUS, validateEnd, validateStart } from "./lib/task-model.js";
 import { renderReflectionBrief, sliceDecisionTrail } from "./lib/task-context.js";
 import { buildReflectionRecord, validateReflect } from "./lib/reflection-model.js";
-import { createLessonStore, renderLessonsSection, parseLessons, parseLessonEntries, parseCommitState, pendingReflections } from "./lib/lessons.js";
+import { createLessonStore, renderLessonsSection, parseLessons, parseLessonEntries, parseCommitState, pendingReflections, validateRevisionEvidence, computePrecedents } from "./lib/lessons.js";
 import { renderInstantNotice, shouldCommit } from "./lib/instant-notice.js";
 import { classifyToolOutcome } from "./lib/classify.js";
 import { createDurableWriter } from "./lib/writer.js";
@@ -190,6 +190,32 @@ const DEFAULTS = {
     commitEvery: 8,
     /** 攒批 token 阈值（按字符数/3 粗估）；0 = 不按 token 判断 */
     commitEveryTokens: 0,
+    /**
+     * 结构化自我反对（**默认关闭**）。
+     *
+     * 开启后 task_reflect 的每条 lesson 必须附 critique：一份可追溯的论证，
+     * 含前提、证据、推理、最强反方、反例、适用边界、替代解释、改判条件、未决问题，
+     * 外加 verdict（holds / narrowed / withdrawn）。
+     *
+     * 默认关闭的理由是成本：这不是"再想一遍"，而是要求模型把论证逐项写出来，
+     * 十一个字段在长任务上可能上千字符。开启时这些字段是**必填**（可标记 n/a/unknown，
+     * 但不能留空），因为可选的质量控制字段实践中等价于不存在
+     * （同一位置的 conflicts 在 55 条经验里被用过 0 次）。
+     */
+    adversarialReview: false,
+    /**
+     * 先例闸门（默认开启）：挑战一条已生效的经验必须举证。
+     *
+     * 规则（用户裁定）：revise 必须引用至少一个「在该经验生效期间发生、
+     * 且结果失败」的任务 id。三条都能机械验证：
+     *   1. 任务真实存在且有 close 记录；
+     *   2. 该任务不是 succeeded；
+     *   3. 该任务开始时的决策环境快照里确实包含被挑战的经验。
+     * 无法验证的是「与其适用条件匹配」——那是语义判断，留给模型。
+     */
+    precedentGate: true,
+    /** 把先例强度（验证次数/反例次数）渲染进 system prompt */
+    precedentInPrompt: true,
   },
 };
 
@@ -218,6 +244,9 @@ function readConfig(raw) {
     if (Number.isSafeInteger(raw.missedTaskMaxPerSession) && raw.missedTaskMaxPerSession >= 0) {
       cfg.missedTaskMaxPerSession = raw.missedTaskMaxPerSession;
     }
+    if (typeof raw.adversarialReview === "boolean") cfg.adversarialReview = raw.adversarialReview;
+    if (typeof raw.precedentGate === "boolean") cfg.precedentGate = raw.precedentGate;
+    if (typeof raw.precedentInPrompt === "boolean") cfg.precedentInPrompt = raw.precedentInPrompt;
     if (raw.lessons && typeof raw.lessons === "object") {
       const l = raw.lessons;
       if (typeof l.enabled === "boolean") cfg.lessons.enabled = l.enabled;
@@ -378,7 +407,10 @@ export function apply(ctx, rawConfig) {
         committedAt = parseCommitState(lessonStore.readTaskText());
       }
       const { lessons } = lessonStore.read(sessionId, cfg.lessons.scopes, committedAt);
-      const text = renderLessonsSection(lessons, { maxLessons: cfg.lessons.maxLessons });
+      const text = renderLessonsSection(lessons, {
+        maxLessons: cfg.lessons.maxLessons,
+        showPrecedent: cfg.precedentInPrompt,
+      });
       renderCount += 1;
       const hash = createHash("sha1").update(text).digest("hex").slice(0, 12);
       if (hash !== lastRenderedHash) {
@@ -908,6 +940,8 @@ export function apply(ctx, rawConfig) {
   function lookupLesson(lessonId) {
     const text = safe(() => lessonStore.readTaskText(), "");
     if (!text) return { ok: false, error: "no task records available" };
+    // 先例计数与 lessons.js 用同一个实现，避免两处口径漂移
+    const precedents = computePrecedents(text);
 
     const rows = [];
     for (const line of text.split("\n")) {
@@ -957,6 +991,10 @@ export function apply(ctx, rawConfig) {
     const close = rows.find((r) => r.record_type === "close" && r.task_id === ownerTaskId);
     if (!open && !close) return { ok: false, error: `source task "${ownerTaskId}" not found` };
 
+    // 2b. 先例强度 / 挑战证据：与 lessons.js 用同一套口径，避免两处算法漂移。
+    //     写在 return 之前，让下面的 find 能拿到（found 是 reflection 记录里的原件）。
+    const precedent = found ? precedents.get(lessonId) ?? null : null;
+
     // 3. 当时生效的经验（来自 open 记录的快照）
     //    快照分两处：lessons[]（详细）与 omitted[]（只有 id+problem）。
     //    两处都要算，否则「count 说 18 条，只列得出 12 条」。
@@ -983,9 +1021,15 @@ export function apply(ctx, rawConfig) {
             problem: found.problem ?? found.pattern ?? null,
             attempted: found.attempted ?? null,
             correction: found.correction ?? null,
+            avoid: found.avoid ?? null,
+            instead: found.instead ?? null,
+            kind: found.kind ?? "lesson",
             applies_when: found.applies_when ?? null,
             confidence: found.confidence ?? null,
             assessment: found.assessment ?? null,
+            critique: found.critique ?? null,
+            evidence: found.evidence ?? null,
+            precedent: precedent,
           }
         : null,
       source_task: {
@@ -1310,7 +1354,12 @@ export function apply(ctx, rawConfig) {
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["problem", "correction", "applies_when"],
+            // correction 不在这里强制：失败经验可以用 avoid/instead 替代它
+            // （可能确实不存在已知的正面做法，硬凑一个 correction 会编造证据）。
+            // 按 kind 的区分由 validateReflect 在代码里执行。
+            required: cfg.adversarialReview
+              ? ["problem", "applies_when", "critique"]
+              : ["problem", "applies_when"],
             properties: {
               problem: {
                 type: "string",
@@ -1347,6 +1396,169 @@ export function apply(ctx, rawConfig) {
                 description:
                   "The lesson_id being repeated or revised. Required when relation is repeat or revise.",
               },
+              kind: {
+                type: "string",
+                enum: ["lesson", "directive", "failure"],
+                description:
+                  "lesson: a heuristic to weigh. directive: a required method, executed without judgment. failure: an action that produced a bad outcome — a constraint, not a heuristic. For failure, fill avoid/instead instead of correction. Defaults to lesson.",
+              },
+              avoid: {
+                type: "string",
+                description:
+                  "Failure lessons only: what not to do when the trigger matches. Use this when there is no known better alternative — do not invent a positive correction you do not believe.",
+              },
+              instead: {
+                type: "string",
+                description: "Failure lessons only: the known replacement, if one exists.",
+              },
+              evidence_task_ids: {
+                type: "array",
+                description:
+                  "Required when relation is revise (if the precedent gate is on). At least one failed task that was started while the lesson named by target was in force. A success does not challenge a precedent.",
+                items: { type: "string" },
+              },
+              critique: {
+                type: "object",
+                description:
+                  "The argument behind this lesson, required when adversarialReview is on. Not a paragraph of self-criticism: fill each field, and mark fields you genuinely cannot answer as n/a or unknown instead of inventing content.",
+                additionalProperties: false,
+                required: [
+                  "verdict",
+                  "claim",
+                  "conclusion",
+                  "revision_conditions",
+                  "validity",
+                  "steelman_rounds",
+                  "opposition_residual",
+                ],
+                properties: {
+                  verdict: {
+                    type: "string",
+                    enum: ["holds", "narrowed", "withdrawn"],
+                    description:
+                      "holds: the counterargument failed after you strengthened it repeatedly, keep the lesson as written. narrowed: it partly succeeded — tighten applies_when. withdrawn: it succeeded — this lesson must not be stored.",
+                  },
+                  steelman_rounds: {
+                    type: "array",
+                    description:
+                      "Iterative strengthening of the opposing case. At least two rounds. A single pass is a formality: write the strongest case against you, defeat it, then strengthen whatever survived and attack that. Each round must threaten a different part of your argument.",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["threatens", "argument", "response", "survives"],
+                      properties: {
+                        threatens: {
+                          type: "string",
+                          enum: [
+                            "claim",
+                            "premises",
+                            "evidence",
+                            "inference",
+                            "conclusion",
+                            "scope",
+                            "alternatives",
+                          ],
+                          description:
+                            "Which part of your argument this round attacks. Use a different part each round; repeating the same target with new wording is not deeper.",
+                        },
+                        argument: {
+                          type: "string",
+                          description:
+                            "The strengthened opposing argument against that part. Strengthen it beyond what its original author would have argued — add the points they missed.",
+                        },
+                        response: {
+                          type: "string",
+                          description: "How your argument answers this round, if it does.",
+                        },
+                        survives: {
+                          type: "string",
+                          description:
+                            "What of this round's attack is still standing after your response. 'Nothing' needs a reason, not a dismissal.",
+                        },
+                      },
+                    },
+                  },
+                  opposition_residual: {
+                    type: "string",
+                    description:
+                      "After all rounds, what part of the opposing case did you not refute. This is the honest residue that keeps the lesson from looking settled when it is not.",
+                  },
+                  claim: {
+                    type: "string",
+                    description: "What is being argued for. Name the decision this lesson asks a future task to make.",
+                  },
+                  premises: {
+                    type: "string",
+                    description:
+                      "The facts, assumptions and conditions the argument depends on. Mark unknown premises as unknown rather than omitting them.",
+                  },
+                  evidence: {
+                    type: "string",
+                    description:
+                      "Observable information supporting each premise: what was run, what was seen. 'It felt right' is not evidence.",
+                  },
+                  inference: {
+                    type: "string",
+                    description: "How the premises lead to the conclusion. State the step, not just the result.",
+                  },
+                  conclusion: {
+                    type: "string",
+                    description: "The claim this lesson now rests on, in one sentence.",
+                  },
+                  steelman: {
+                    type: "string",
+                    description:
+                      "Optional one-line summary of the strongest opposing case, after the rounds above. The rounds are what count; this is a convenience for reading later.",
+                  },
+                  counterexamples: {
+                    type: "string",
+                    description: "Observations that would count against the conclusion, including ones you have not seen yet.",
+                  },
+                  scope: {
+                    type: "string",
+                    description:
+                      "Conditions under which the conclusion holds, and where it stops. This becomes the boundary shown to future tasks.",
+                  },
+                  alternatives: {
+                    type: "string",
+                    description:
+                      "Other explanations for the same observations. If you did not rule them out, say so.",
+                  },
+                  revision_conditions: {
+                    type: "string",
+                    description:
+                      "What new evidence or change of conditions should make you abandon or modify this lesson. Required: a claim that cannot be revised is not falsifiable.",
+                  },
+                  unresolved: {
+                    type: "string",
+                    description: "What you could not determine. Preserve the uncertainty here rather than hiding it.",
+                  },
+                  validity: {
+                    type: "object",
+                    description:
+                      "Three separate checks. Keeping them apart prevents a formally valid argument from unsupported premises from looking sound.",
+                    additionalProperties: false,
+                    required: ["premise_truth"],
+                    properties: {
+                      deductive: {
+                        type: "string",
+                        enum: ["valid", "invalid", "not_applicable", "unresolved"],
+                        description: "If the premises are true, must the conclusion be true?",
+                      },
+                      inductive: {
+                        type: "string",
+                        enum: ["strong", "moderate", "weak", "not_applicable", "unresolved"],
+                        description: "How much do the observations actually support the conclusion?",
+                      },
+                      premise_truth: {
+                        type: "string",
+                        enum: ["established", "partial", "assumed", "unresolved"],
+                        description: "Are the premises themselves supported by evidence?",
+                      },
+                    },
+                  },
+                },
+              },
               conflicts: {
                 type: "array",
                 description:
@@ -1380,7 +1592,10 @@ export function apply(ctx, rawConfig) {
     },
     output: REFLECT_OUTPUT,
     async execute(args, exec) {
-      const v = validateReflect(args);
+      const v = validateReflect(args, {
+        adversarialReview: cfg.adversarialReview,
+        precedentGate: cfg.precedentGate,
+      });
       if (!v.ok) throw new Error(v.error);
 
       const entry = closed.get(v.taskId);
@@ -1394,8 +1609,26 @@ export function apply(ctx, rawConfig) {
       const sessionId = sessionIdOf(exec?.agent);
       const offset = entry.lessonsWritten;
 
+      // ── 先例闸门：机械校验证据 ────────────────────────────────────────────
+      // validateReflect 只检查「有没有给 id」；这里检查这些 id 是否真的构成反例：
+      //   任务存在且有结论、不是 succeeded、且被挑战的经验当时确实在生效。
+      if (cfg.precedentGate) {
+        const taskText = lessonStore.readTaskText();
+        for (const l of v.lessons) {
+          if (l.relation !== "revise" || !l.target) continue;
+          const check = validateRevisionEvidence({
+            taskText,
+            target: l.target,
+            evidenceIds: l.evidenceIds,
+          });
+          if (!check.ok) throw new Error(check.error);
+          l.evidence = check.evidence;
+        }
+      }
+
       // `none` 不落盘：无新增信息的反思不占用后续注入预算（治理规范 §2.1）
-      const written = v.lessons.filter((l) => l.relation !== "none");
+      // `withdrawn` 也不落盘：自我反对已推翻它，写进去只会污染记忆。
+      const written = v.lessons.filter((l) => l.relation !== "none" && l.critique?.verdict !== "withdrawn");
       entry.lessonsWritten += written.length;
       if (written.length > 0) {
         writeRecord(buildReflectionRecord({
@@ -1516,6 +1749,59 @@ export function apply(ctx, rawConfig) {
         if (r.lesson.applies_when) L.push(`  applies when: ${r.lesson.applies_when}`);
         if (r.lesson.confidence) L.push(`  confidence:  ${r.lesson.confidence}`);
         if (r.lesson.assessment) L.push(`  assessment:  ${r.lesson.assessment}`);
+        // 自我反对：完整论证，只在这里展开，不进 system prompt
+        const cr = r.lesson.critique;
+        if (cr) {
+          L.push("");
+          L.push("  ARGUMENT");
+          if (cr.verdict) L.push(`    verdict:   ${cr.verdict}`);
+          for (const [label, key] of [
+            ["claim", "claim"],
+            ["premises", "premises"],
+            ["evidence", "evidence"],
+            ["inference", "inference"],
+            ["conclusion", "conclusion"],
+            ["counterexamples", "counterexamples"],
+            ["scope", "scope"],
+            ["alternatives", "alternatives"],
+            ["revision", "revision_conditions"],
+            ["unresolved", "unresolved"],
+          ]) {
+            const v = cr[key] ?? cr.markers?.[key];
+            if (v) L.push(`    ${label}: ${v}`);
+          }
+          const rounds = Array.isArray(cr.steelman_rounds) ? cr.steelman_rounds : [];
+          if (rounds.length > 0) {
+            L.push(`    steelman (${rounds.length} rounds):`);
+            for (const rd of rounds) {
+              L.push(`      round ${rd.round} → threatens ${rd.threatens || "?"}`);
+              if (rd.argument) L.push(`        strengthened: ${rd.argument}`);
+              if (rd.response) L.push(`        response:     ${rd.response}`);
+              if (rd.survives) L.push(`        survives:     ${rd.survives}`);
+            }
+          } else if (cr.steelman) {
+            L.push(`    steelman: ${cr.steelman}`);
+          }
+          if (cr.opposition_residual) L.push(`    unrefuted residue: ${cr.opposition_residual}`);
+          const vd = cr.validity;
+          if (vd) {
+            const parts = [];
+            if (vd.deductive) parts.push(`deductive=${vd.deductive}`);
+            if (vd.inductive) parts.push(`inductive=${vd.inductive}`);
+            if (vd.premise_truth) parts.push(`premises=${vd.premise_truth}`);
+            if (parts.length > 0) L.push(`    validity:  ${parts.join(", ")}`);
+          }
+        }
+        // 先例强度：可机械计算的验证计数
+        const pc = r.lesson.precedent;
+        if (pc && (pc.verified > 0 || pc.counter > 0)) {
+          L.push(`  precedent:   verified ${pc.verified}x, ${pc.counter} counterexample(s), ${pc.exposures} exposure(s)`);
+        }
+        // 挑战这条先例时引用过的失败任务
+        const ev = Array.isArray(r.lesson.evidence) ? r.lesson.evidence : [];
+        if (ev.length > 0) {
+          L.push(`  challenged using: ${ev.map((e) => `${e.task_id} (${e.status})`).join(", ")}`);
+        }
       } else {
         L.push("  (manually maintained entry; body is in lessons.jsonl — use the CLI `show`)");
       }

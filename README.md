@@ -4,7 +4,7 @@
 [English](README_en.md)
 > 让 Agent 在任务结束后复盘，把可复用的经验沉淀下来，并在后续任务中按作用域注入。
 >
-> 运行环境 DeepSeek Harness `0.2.2-rc.1` 
+> 运行环境 DeepSeek Harness `0.2.1-rc.5` · 单包安装
 
 ---
 
@@ -127,6 +127,168 @@ OTHER LESSONS IN FORCE WHEN THAT TASK STARTED (11 total):
 - `correction` 必须是可用于替代的做法，且**不能比 `problem` 更窄**——如果修法说得比问题还少，两者必有一个是错的
 
 > 兼容：旧记录只有 `pattern` 时视为 `problem`，不需要迁移历史数据。
+
+#### 三种条目类型：经验 / 明确方法 / 失败经验
+
+`kind` 决定一条记忆「要不要被判断」：
+
+| `kind` | 语义 | 渲染位置 | 必需字段 |
+|---|---|---|---|
+| `lesson`（默认） | 启发式：「这样做更好」，由模型判断是否适用 | 各作用域列表 | `problem` + `correction` |
+| `directive` | 明确方法：直接要求执行，不判断 | `Required method:` | `correction` |
+| `failure` | 失败经验：触发即排除，**不是**可权衡的启发式 | 独立的 `## Known failures` 块 | `problem` + `avoid` |
+
+**为什么失败经验要独立一类**：现有 schema 强制 `correction` 必填，且规定它「不得比 `problem` 更窄」。
+这条规则实际上**禁止把约束写成否定式**。但失败经验的自然形态常常是纯否定：
+
+> 不要先改代码再验证。
+
+——未必存在一个已知的正面替代做法。硬塞进 `correction` 就会编造一个自己也不相信的修法，
+或者丢掉「我确实不知道替代方案，但这条行不通」这个信息。
+`failure` 用 `avoid`（不要做什么）+ 可选 `instead`（已知替代）表达，`correction` 不再必填。
+
+渲染上它也不与普通经验并列：注入时单独成块，标题写明
+
+```text
+Known failures
+Actions that produced a bad outcome. When the trigger matches, do not do this.
+Unlike a lesson, this is not a heuristic to weigh — it is a constraint.
+```
+
+——否则「硬禁止」会和「可权衡的启发式」等价，进而被稀释成建议。
+
+> 兼容：旧记录没有 `kind` 时默认 `lesson`，行为不变。
+
+#### 结构化自我反对（`adversarialReview`，默认关）
+
+目的不是让模型写一段自我批评，而是让它在落库前**交出一份可追溯的论证**，
+并且**先把反方补强到不再是可以轻易击败的稻草人**。
+
+##### 论证的十一个字段
+
+| 字段 | 回答的问题 | 目的 |
+|---|---|---|
+| `claim` | 正在论证什么？ | 明确论证对象 |
+| `premises` | 依赖哪些事实、假设、条件？ | 暴露隐含假设 |
+| `evidence` | 前提有什么可观察的信息支持？ | 检查前提可靠性 |
+| `inference` | 前提如何推出结论？ | 检查逻辑有效性 |
+| `conclusion` | 最终主张是什么？ | 收束论证 |
+| `steelman` | 最强的反方论证是什么？ | 对抗自我确认 |
+| `counterexamples` | 哪些观察会挑战结论？ | 检查适用边界 |
+| `scope` | 结论在哪些条件下成立？ | 防止过度泛化 |
+| `alternatives` | 还有哪些同样能解释现象的原因？ | 避免过早归因 |
+| `revision_conditions` | 什么情况会使我改变结论？ | **保持可证伪** |
+| `unresolved` | 还有什么无法确定？ | 保留不确定性 |
+
+##### 反方必须迭代补强，不能只反驳一次
+
+单个 `steelman` 字段的实际写法几乎总是一次性走过场：写一段看起来很强的反对意见，
+立刻反驳掉，然后宣布自己通过了检验。所以这里要求**轮次**：
+
+```text
+steelman_rounds:
+  - threatens   这一轮攻击论证的哪一环（claim/premises/evidence/inference/…）
+    argument    针对那一环加固后的反方论证（要说出原作者没想到的点）
+    response    你的反驳
+    survives    反驳之后，这一轮还剩下什么没被驳倒
+  - threatens   ← 必须换一个环节
+    ...
+opposition_residual   所有轮次结束后，反方还有哪部分你没驳倒
+```
+
+程序机械检查三条，模型无法靠措辞绕过：
+
+| 检查 | 理由 |
+|---|---|
+| 至少 **2 轮** | 一轮不是对抗，是走过场 |
+| 每轮 `threatens` 必须不同 | 在同一处反复加固只是换措辞，不是深入 |
+| 必须填 `opposition_residual` | 「真的思考过」的证据是承认反方还剩下什么，而不是宣布全胜 |
+
+留 `opposition_residual` 这一项是关键：如果允许留空，模型会写「反方完全不成立」，
+而那几乎从不是真的。
+
+##### 三种有效性分开评估
+
+```text
+validity:
+  deductive        valid / invalid / not_applicable / unresolved   —— 前提为真时结论是否必然为真
+  inductive        strong / moderate / weak / …                    —— 证据在多大程度上支持结论
+  premise_truth    established / partial / assumed / unresolved     —— 前提本身是否有依据
+```
+
+三者必须分开，否则会出现**形式有效但前提毫无依据**的论证——它看起来无懈可击，
+实际没有任何信息。`premise_truth` 是必填项；若填 `unresolved`，则必须在 `unresolved`
+里说明哪些问题还没确定。
+
+##### 允许留空，但必须显式标记
+
+不要求每次都填满全部字段。确实不适用或没有信息时，写 `n/a` / `unknown` / `无` / `不适用`，
+程序会把它记进 `markers`，与正文分开存：
+
+```text
+critique.alternatives  = 省略
+critique.markers       = { "alternatives": "n/a" }
+critique.unresolved_keys = ["alternatives"]
+```
+
+这样事后能区分「**没写**」与「**写了但没有**」。编造内容来填满字段，比如把
+`alternatives` 写成一句正确但空泛的话，反而是这里最想避免的行为。
+
+##### verdict 的三条强制规则
+
+| `verdict` | 结果 |
+|---|---|
+| `holds` | 正常写入 |
+| `narrowed` | 必须填 `applies_when`（标出这条经验在哪里停止适用），否则拒收 |
+| `withdrawn` | **不写入**，`lessons_recorded: 0` |
+
+**必填而非可选，这一点是有意设计的。** 同样的位置曾经放过一个可选字段 `conflicts`
+（声明两条经验的张力），结果是 **55 条经验里被用过 0 次**——可选的质量控制字段
+在实践中等价于不存在。也正因为它是必填，代价不小，所以**默认关闭**：
+这不是「再想一遍」，而是要求把论证逐项写出来。
+
+##### 论证出的边界会进入提示词
+
+`critique.scope` 不需要第二条经验当对手（对手是「旧做法」本身），所以它渲染成独立的
+边界段，而不是挤进需要两两配对的 `[CONFLICTS]`：
+
+```text
+[BOUNDARIES] Each lesson below was checked against the strongest case for the old way of working.
+The old way is still better under the stated condition — prefer it there, and apply the lesson only outside it.
+- task-xxx#0: 报错信息极长且与改动位置无关时，先猜再验证更省
+```
+
+其余字段（完整论证、各轮补强、残余反方、有效性）**不进入 system prompt**，
+用 `lessons_lookup` 展开查看。
+
+#### 先例原则（`precedentGate` + `precedentInPrompt`）
+
+> 有效的方法应该被重复使用，直到有充分的理由改变它。
+> 改变一种已被验证有效的方法，所需要的证据标准应该远高于最初采用这种方法时的标准。
+
+**「验证有效」是或然性的**：一条经验哪怕只成功过一次也算验证有效，只是或然性不高。
+所以这里不做「是否已被证明」的判断，只数次数：
+
+| 计数 | 来源 |
+|---|---|
+| `verified` | 该经验在任务开始时的决策环境快照里、且任务 `succeeded` 的次数 |
+| `counter` | 同上，但任务失败的次数 |
+| `exposures` | 总暴露次数 |
+
+两者都是 `task_open.environment` 与 `task_close.status` 的 join，**不需要模型自评，也不需要对照组**。
+渲染成 `Precedent: verified 19x, 1 counterexample(s)`。
+
+**挑战先例必须举证。** `relation: "revise"` 要求 `evidence_task_ids`，程序机械校验三条：
+
+1. 引用的任务真实存在，且有 `close` 记录；
+2. 该任务**不是** `succeeded`——一次成功不构成对先例的挑战；
+3. 该任务开始时的决策环境快照里**确实包含**被挑战的经验（= 当时它在生效）。
+
+第 4 条「与其适用条件匹配」是语义判断，程序不验证，留给模型。
+
+这一条闸门解决的是「`revise` 太容易」：修复前它的实际使用只有 2 次，
+而任何模型都可以凭一时兴起改写一条被验证过 19 次的先例。
+
 
 
 ### 2.4 决策环境记录
@@ -258,13 +420,16 @@ a risk they must know), say just that one thing and nothing else.
 |---|---|---|
 | 1 | 任务边界仍依赖模型遵循提示并调用 `task_start` / `task_end` | 当前提示要求 `task_start` 必须是任务第一项动作，但没验证，漏开任务仍会导致决策轨迹缺失 |
 | 2 | 语义判断由模型负责 | 模型仍然可能把经验分错层、写出空泛的 `boundary`，或错误声明重复/冲突，检查器无法判断这些语义问题 |
-| 3 | 三层共用一个 system prompt section | 任一层的注入内容变化都会改变该 section，并触发一次全量提示词缓存重算，实测大约 69 万 token（数字不固定，看个人使用），之后请求恢复缓存命中 |
+| 3 | 三层共用一个 system prompt section | 任一层的注入内容变化都会改变该 section，并触发一次全量提示词缓存重算，实测大约 69 万 token（可能更多，测试样本不够多），之后请求恢复缓存命中 |
 | 4 | 不做自动冲突解决 | 冲突双方继续注入，由Agent根据条件判断，这是刻意设计的 |
 | 5 | 不做语义相似度去重 | 是否属于同一经验由模型声明 `repeat` / `revise`，程序按条目 ID 和声明执行 |
 | 6 | 无 workspace 维度 | 目前不能自动按项目跨会话共享经验，需要显式晋升到 `global` 或指定的 `session` 作用域 |
 | 7 | UI没了 | 客户端 bundle 在当前环境加载失败，放弃了，现在只能通过配置文件和命令行维护（哭） |
 | 8 | 注入内容是从持久化记录派生的视图 | 任务/反思记录与记忆条目保存在 JSONL 中；删除相应数据文件会丢失历史依据，不是缓存！！！ |
 | 9 | 写入器长开文件句柄 | 轮转日志前必须先禁用插件，再操作文件 |
+| 10 | 自我反对只能逼近「不敷衍」，不能保证 | 程序强制的是结构（十一字段、≥2 轮补强、每轮换环节、必须承认残余反方）；两段形式不同实质敷衍的论证仍然能通过。目标是让敷衍留下痕迹，不是杜绝敷衍 |
+| 11 | 先例闸门的第 4 条无法机械验证 | 「证据任务与被挑战经验的适用条件是否匹配」是语义判断，程序只保证任务真实、失败、经验当时在生效 |
+| 12 | `verified` 计数没有对照组 | 同时进入生效集合的经验共享同一批任务，计数区分不出经验好坏，只反映暴露窗口长度（见 4.5） |
 
 
 ---
@@ -319,6 +484,48 @@ a risk they must know), say just that one thing and nothing else.
 
 原始计数与修正后的有效计数同时保留。只看原始计数会高估失败数量。插件中的 `tool_failures` 目前仍使用非零退出判断。
 
+### 4.5 先例计数在真实数据上的分布（2026-11-10）
+
+拿本机 `tasks.jsonl`（44 个已关闭任务、32 条经验被快照过）跑 `computePrecedents`：
+
+```text
+计算出的先例条目: 32
+验证次数最多的 6 条:
+  19 verified / 1 counter  task-a08f9625…
+  19 verified / 1 counter  task-28b1c958…
+  19 verified / 1 counter  task-afbdb466…
+  （另 3 条相同）
+有反例的条目: 11 / 32
+从未生效过的条目: 0
+```
+
+**这组数字说明的问题**：23 条经验是同一时刻进入生效集合的，之后一直同时生效——
+**没有任何一组任务是在它们缺席时跑的**。所以 `verified` 的绝对值区分不出经验好坏，
+它只衡量暴露窗口的长度。
+
+这就是为什么 README 开头把「验证有效」定义为**或然性的**：这个计数能回答
+「这条经验被用过多少次、其中几次成功」，不能回答「它是不是好东西」。
+把它当必要条件（改写前得有反例）是成立的；把它当充分条件（verified 高所以一定对）不成立。
+
+### 4.6 三个特性的实测边界（2026-11-10）
+
+| 特性 | 已验证 | 未验证 |
+|---|---|---|
+| 自我反对 | 十一字段结构、迭代补强三条（≥2 轮 / 每轮换环节 / 必须有残余反方）、`withdrawn` 不落盘、`narrowed` 强制 `applies_when`、`validity.premise_truth` 必填、`n/a` 标记与正文分离 | **论证质量**——程序只能保证「它被逼着补强了两轮且承认了残余」，无法判断那些论证是不是真的有力 |
+| 先例闸门 | 三条机械校验（存在 / 非成功 / 当时在生效）全部生效，四类无效证据分别被拒 | 「与其适用条件匹配」这一条是语义判断，程序不验证 |
+| 失败经验类型 | `avoid`/`instead` 落盘、独立渲染成 `Known failures`、不再混进 `[Lesson N]` | 模型是否真的会更严格地对待否定性约束——需要长期观察才可能看出 |
+
+**关于「迭代补强」这一步的上限，需要说清楚。**「必须补强到反方不再是稻草人」是**语义要求**，
+程序只能逼近它：轮数下限、每轮必须换攻击环节、必须留下没驳倒的部分。
+一个决心走过场的模型仍然可以写两段形式不同但实质敷衍的论证。
+真正的区分只能靠事后读 `lessons_lookup` 里的完整论证——所以这套设计的目标是
+**让敷衍留下痕迹**，而不是保证不敷衍。
+
+**一个已知风险**：先例闸门如果定得太严，模型的反应不是「更谨慎地修订」，而是**干脆不用 `revise`**。
+修复前 `revise` 在 55 条记录里只出现过 2 次，余量本来就小。上线后应当盯 `relation` 分布，
+如果 `revise` 归零，说明闸门变成了事实上的禁用。
+
+
 ---
 
 ## 五、使用方法
@@ -357,6 +564,9 @@ dsh plugin --profile web add dsh-lessons
         recordEvents: true                         # 落盘工具调用与失败（不注入）
         stateFromFile: true                        # 任务状态从文件推导（见 5.2.1）
         silentReflection: true                     # 复盘只在思维链里做，不写成回复（见 2.4）
+        adversarialReview: false                   # 每条经验必须附完整论证（成本高，默认关，见 2.3）
+        precedentGate: true                        # 改写先例必须引用真实反例（见 2.3）
+        precedentInPrompt: true                    # 把 verified/counter 计数渲染进提示词
         lessons:
           enabled: true
           maxLessons: 0                            # 0 = 全部注入
@@ -425,14 +635,14 @@ node tools/deprecate.mjs --list
 node tools/lessons.mjs check   # 引用完整性 / 状态自洽 / 边界是否声明
 ```
 
-不随包分发测试脚本；开发仓库内另有 178 项自动化测试。
+不随包分发测试脚本；开发仓库内另有 205 项自动化测试（8 个测试文件）。
 
 ---
 
 ## 六、文件结构
 
 ```text
-index.js                 插件入口：四个工具 + system prompt 注入 + 事件落盘
+index.js                 插件入口：三个工具 + system prompt 注入 + 事件落盘
 lib/
   task-model.js          任务记录与参数校验
   task-context.js        决策轨迹截取（不含工具调用清单）

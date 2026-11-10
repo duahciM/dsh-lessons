@@ -1,8 +1,9 @@
 # 反思生成与持久化（步骤 1 + 步骤 2）
 
->  **Hindsight 已从热路径移除。**
+> ⚠️ **2026-11-01 更新：Hindsight 已从热路径移除。**
 > 本文第五节「记忆文档形态」与第六节「标签体系」描述的是当时的 Hindsight 写入，现已不适用。
 > 现状：反思只写 `tasks.jsonl`（`record_type: "reflection"`），是唯一来源。
+> 归档代码见 `attic/`。
 >
 > 目标：**Agent 消费任务关闭时注入的决策轨迹，产出结构化反思，并落盘。**
 >
@@ -42,7 +43,7 @@ task_reflect(task_id, assessment, lessons)
 ```
 
 **关键点**：反思由 **Agent 产出**，Hindsight 只做存储与检索。
-不用 Hindsight 的 `reflect`（那需要 LLM provider，且会把判断交给另一个模型）。
+我们不用 Hindsight 的 `reflect`（那需要 LLM provider，且会把判断交给另一个模型）。
 
 ---
 
