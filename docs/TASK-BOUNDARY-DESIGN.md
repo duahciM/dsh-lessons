@@ -184,18 +184,6 @@ task.start_seq ─────────────── task.end_seq
 
 > **已移除**：`tool_calls`、`call_ids`。工具调用不是反思对象，留计数足矣；明细仍在 `error-events.jsonl`。
 
-### 3.4 实测样本（close）
-
-```json
-{"record_type":"close","ev":"task_close","task_id":"task-5d30ac6a-...",
- "session_id":"session-7ce8663d-...",
- "goal":"最终验证：决策轨迹版反思材料包含前置用户请求，且完全剔除工具调用",
- "expected_result":"...","start_time":1793524777294,"end_time":1793524787319,
- "status":"succeeded","result":"窗口内 1 次工具调用，exit 5。...",
- "start_seq":5686,"end_seq":5700,"tool_failures":1,
- "parent_task_id":null,"closed_by":"manual","recorded_at":1793524787319}
-```
-
 ---
 
 ## 四、工具契约
@@ -266,11 +254,6 @@ task.start_seq ─────────────── task.end_seq
 
 判据是 turn 边界：若最近一条 `turn/start` 之后有用户消息，它就是同一 turn 的前置请求；跨 turn 的不取（避免抓到上一个任务的话）。
 
-实测：
-
-```
-[5369] REQUEST (before the task was opened): 不要管工具调用，甚至应该剔除工具调用…
-```
 
 ### 5.3 配额
 
@@ -307,46 +290,6 @@ task.start_seq ─────────────── task.end_seq
             summary: "task closed: task-xxx" }
 }
 ```
-
-### 6.3 材料结构（实测输出）
-
-```
-<metacog_task_closed>
-A task you declared has just been closed. Reconstruct how you worked, then judge it.
-
-TASK ID: task-5d30ac6a-...
-GOAL: 最终验证：决策轨迹版反思材料包含前置用户请求，且完全剔除工具调用
-EXPECTED RESULT: ...
-REPORTED STATUS: succeeded
-REPORTED RESULT: 窗口内 1 次工具调用，exit 5。...
-
-DECISION TIMELINE (session seq 5686..5700, 14 events):
-  [5369] REQUEST (before the task was opened): 不要管工具调用，甚至应该剔除工具调用…
-  (no human messages or assistant text were recorded inside this task)
-
-INTERNAL REASONING (excerpts, only where no visible text was produced):
-  [5690] Now do one failing step inside and close…
-
-AUXILIARY SIGNALS (evidence only, not the subject of the review):
-- tool-level failures during the task: 1
-
-Reconstruct the decision process from the timeline above, and address each point:
-1. How did you understand the goal, and what did you take the expected result to mean?
-2. What approach did you choose, and what reason did you give or imply for it?
-3. What new information changed your direction, and how did you respond to it?
-4. How did you use information you already had?
-5. How did you handle the difficulties you ran into?
-6. Where does the actual result differ from the expected result, and why?
-
-Ground every claim in the timeline. If it does not show a decision, say that it is
-not established rather than inventing one. Tool outcomes are auxiliary evidence only:
-do not turn this into a review of tool usage.
-</metacog_task_closed>
-```
-
-**六问与用户的六项要求一一对应。** 末句明确禁止把它变成工具使用复盘。
-
----
 
 ## 七、状态机与边界情形
 
@@ -396,13 +339,6 @@ do not turn this into a review of tool usage.
 | 被顶替 | `abandoned` / `superseded`，不静默丢弃 |
 | 前置请求 | 任务中途开启时，用户原话仍被纳入材料 |
 
-### 8.4 一次真实注入（节选）
-
-任务在用户纠偏之后开启，材料正确定位到那条纠偏：
-
-```
-  [5369] REQUEST (before the task was opened): 不要管工具调用，甚至应该剔除工具调用…
-```
 
 ---
 
