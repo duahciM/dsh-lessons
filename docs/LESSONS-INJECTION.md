@@ -76,7 +76,7 @@ text: typeof section.text === "function" ? section.text(context) : section.text
 
 所以每步装配时都会用当时的记忆重新求值 —— 这正是「动态注入」需要的。
 
-### 3.2 我们的注册
+### 3.2 注册
 
 ```js
 systemPrompt.section({
@@ -239,7 +239,7 @@ Confidence: high
 
 ---
 
-## 八、缓存友好改造：攒批 + 即时通知（2026-11-07）
+## 八、缓存友好改造：攒批 + 即时通知
 
 ### 8.1 动机
 
@@ -337,5 +337,4 @@ section     → 1 条 → 3 条（global:1, reflection:2）
 | `lib/instant-notice.js` | 即时通知渲染、攒批阈值判定 |
 | `index.js` | `systemPrompt.section` 注册 + 攒批 + 诊断 |
 | `data/lessons-render.jsonl` | 内容变化 / instant / commit 诊断 |
-| `D:/LLM/cache-probe/` | 缓存实验脚本与 59 个用例 |
 
