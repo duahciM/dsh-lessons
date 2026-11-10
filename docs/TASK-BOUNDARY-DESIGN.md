@@ -403,7 +403,3 @@ tasks.jsonl 的 close 记录
 | `lib/task-model.js` | 记录构造、参数校验、状态枚举 |
 | `lib/task-context.js` | 决策轨迹截取、前置请求、材料渲染 |
 | `lib/writer.js` | 崩溃安全写入器 |
-| `selftest.mjs` | 53 个离线用例 |
-| `preflight.mjs` | 安装前 schema 预检 |
-| `data/tasks.jsonl` | 运行期任务记录 |
-| `evidence/iteration-*.jsonl` | 各迭代的早期记录（字段格式不同） |
