@@ -104,60 +104,8 @@ node tools/lessons.mjs add --scope global --kind directive \
 
 ---
 
-## 五、三个实验问题怎么落地
 
-### Q1：经验能否迁移到另一个项目（经验是否有用）？
-
-| 步骤 | 做法 |
-|---|---|
-| 在项目 A 积累反思 | 正常做任务，`task_reflect` |
-| 迁移到项目 B 的会话 | `move <id> --to session:<B 的会话>` 或 `move <id> --to global` |
-| 在 B 做同类任务 | 对比有迁移 / 无迁移的表现 |
-
-用 `copy` 而非 `move`，可以保留 A 的原状态，做「同一经验在两个项目各跑一次」的对照。
-
-### Q2：全局记忆和单会话记忆分别贡献了什么？
-
-| 组 | global | session | reflection | 回答的问题 |
-|---|---|---|---|---|
-| A | ✅ | ✅ | ✅ | 完整记忆的效果 |
-| B | ❌ | ❌ | ❌ | 纯基线 |
-| C | ✅ | ❌ | ❌ | **全局方法的单独贡献** |
-| D | ❌ | ✅ | ✅ | **会话记忆的单独贡献** |
-
-C 与 D 各自减去 B，即可分离两者。
-
-### Q3：明确告诉正确方法，是否比只提供经验更有效？
-
-同一批内容，两种 `kind`：
-
-| 组 | 内容 |
-|---|---|
-| 经验组 | `--kind lesson` |
-| 指令组 | `--kind directive` |
-
-用 `export` 导出经验组，再 `import` 灌成指令组，保证**内容完全相同，只有框架不同**。
-
-### 操作流程
-
-```bash
-# 1. 导出素材
-node tools/lessons.mjs export --session <本会话> --out base.json
-
-# 2. 给实验组播种
-node tools/lessons.mjs import base.json --to session:<A 的会话>
-
-# 3. 对照组什么都不给（新会话只能看到 global）
-
-# 4. 回收
-node tools/lessons.mjs remove session:xxx#1 session:xxx#2
-```
-
-`list --session <id>` 随时确认「这个会话到底看到了什么」——这是验证实验组配置正确的唯一可靠方式。
-
----
-
-## 六、作用域开关
+## 五、作用域开关
 
 ```yaml
 lessons:
@@ -167,8 +115,6 @@ lessons:
     reflection: true   # 关闭 = 无任务反思
 ```
 
-B/C/D 组需要重启插件才生效（改配置 → disable/enable）。
-播种方案（`import` 到指定会话）不需要重启，切换更快，**推荐优先用播种**。
 
 **注意**：切换开关会改变 system prompt，每次切换触发一次全量重算（见 `LESSONS-INJECTION.md` 第五节）。
 
@@ -186,13 +132,6 @@ B/C/D 组需要重启插件才生效（改配置 → disable/enable）。
 - 三域开关逐个关闭
 - 渲染分组（只有某域时不出现多余标题）
 - 双文件 mtime 缓存 + 换会话不复用缓存
-
-真实运行时（诊断记录 `data/lessons-render.jsonl`）：
-
-```
-会话 A（本会话）        lessons=7  {global:2, session:1, reflection:4}
-会话 OTHER-SESSION      lessons=2  {global:2, session:0, reflection:0}
-```
 
 同一个库、同一进程，仅因当前会话不同而注入不同内容。
 
