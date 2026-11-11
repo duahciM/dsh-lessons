@@ -745,8 +745,6 @@ node tools/deprecate.mjs --list
 node tools/lessons.mjs check   # 引用完整性 / 状态自洽 / 边界是否声明
 ```
 
-不随包分发测试脚本；开发仓库内另有 247 项自动化测试（10 个测试文件）。
-
 ---
 
 ## 六、文件结构
