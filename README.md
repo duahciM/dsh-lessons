@@ -410,7 +410,6 @@ a risk they must know), say just that one thing and nothing else.
 
 任务模式有一个结构性风险：**反思材料是否存在，取决于模型有没有调用 `task_start`。**
 模型忘了开任务，那一整段工作就没有任何材料——不是「材料不完整」，是「没有材料」。
-这就是入口处的达摩克利斯之剑。
 
 `turnReflection` 把它挪到运行时：**每回合结束，直接把该回合发生的事交给模型反思一次**，
 不问模型有没有开过任务。
@@ -422,17 +421,17 @@ a risk they must know), say just that one thing and nothing else.
 | 模型忘了就无法产生材料？ | 是 | 否 |
 | 边界是否等于决策边界 | 是 | **否** |
 
-**代价必须说清楚：turn 边界不是决策边界。**
+**代价：turn 边界不是决策边界。**
 
 实测本机 20 个可分析任务：
 
 ```text
 跨 turn 最多的 10 个：
-  13 turns   450 events   task-74483339…
-   5 turns   119 events   task-7e32da40…
-   4 turns   331 events   task-d6dd342a…
-   4 turns   906 events   task-7dcd1d2e…
-   2 turns   224 events   task-1ea11e3c…
+  13 turns   450 events   task-A
+   5 turns   119 events   task-B
+   4 turns   331 events   task-C
+   4 turns   906 events   task-D
+   2 turns   224 events   task-E
 
 跨 >1 turn: 6/20 (30%)
 跨 >=3 turn: 4
@@ -600,9 +599,9 @@ turn 63 之后直到会话结束，`task_start` 出现 0 次。
 ```text
 计算出的先例条目: 32
 验证次数最多的 6 条:
-  19 verified / 1 counter  task-a08f9625…
-  19 verified / 1 counter  task-28b1c958…
-  19 verified / 1 counter  task-afbdb466…
+  19 verified / 1 counter  task-AA
+  19 verified / 1 counter  task-BB
+  19 verified / 1 counter  task-CC
   （另 3 条相同）
 有反例的条目: 11 / 32
 从未生效过的条目: 0
