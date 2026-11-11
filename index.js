@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { appendFileSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { buildTaskRecord, newTaskId, TASK_STATUS, validateEnd, validateStart } from "./lib/task-model.js";
-import { renderReflectionBrief, sliceDecisionTrail } from "./lib/task-context.js";
+import { renderReflectionBrief, renderTurnBrief, sliceDecisionTrail } from "./lib/task-context.js";
 import { buildReflectionRecord, validateReflect } from "./lib/reflection-model.js";
 import { createLessonStore, renderLessonsSection, parseLessons, parseLessonEntries, parseCommitState, pendingReflections, validateRevisionEvidence, computePrecedents } from "./lib/lessons.js";
 import { renderInstantNotice, shouldCommit } from "./lib/instant-notice.js";
@@ -61,27 +61,54 @@ const TASK_BOUNDARY_TEXT = [
 /**
  * 漏开任务时的提醒正文。
  *
- * 措辞必须与上面的判定保持一致——否则模型会拿到两套「什么算任务」的标准。
+ * 定位：**只陈述事实，把判断权交回模型。**
  *
- * 这里**只向前看**：明确不要求事后补开。原因是补开得到的决策窗口是空的，
- * 反思只能基于零证据编造；而 TASK_BOUNDARY_TEXT 本身也写着
+ * 这条提醒不是命令。原因有二：
+ *   1. 不是所有工作都符合任务的判定标准。硬催会逼模型给每次闲聊、
+ *      每个一次性问答都开一个空任务，污染任务记录，也让反思材料变噪音。
+ *   2. 「要不要开任务」本身就是模型该做的判断。插件负责记录，
+ *      不负责替它决定工作单元的边界。
+ *
+ * 所以措辞明确写明「你有不开的选择」，同时把「如果不开，会失去什么」
+ * 讲清楚——让它是在知情下选择，而不是被推着走。
+ *
+ * 措辞必须与 TASK_BOUNDARY_TEXT 的判定一致，否则模型会拿到两套标准。
+ *
+ * 这里**只向前看**：不要求事后补开。补开得到的决策窗口是空的，
+ * 反思只能基于零证据编造；而 TASK_BOUNDARY_TEXT 也写着
  * 「Never do the work first and declare the task afterwards」。
- * 两份文本若一要求补开、一禁止补开，模型会收到互相冲突的指令。
+ *
+ * @param {number} calls 本回合工具调用次数
+ * @param {number} edits 本回合文件改动次数
+ * @param {object} [ctx]
+ * @param {boolean} [ctx.everBefore] 该会话此前是否开过任务
  */
-function missedTaskText(calls, edits) {
+function missedTaskText(calls, edits, ctx = {}) {
   const work = [`${calls} 次工具调用`];
   if (edits > 0) work.push(`${edits} 次文件改动`);
-  return [
-    "<lessons_task_missing>",
-    `这一回合做了实际工作（${work.join("、")}），但没有声明任何任务。`,
-    "",
-    "按任务的定义：一个具有明确目标或预期结果、需要一个或多个工作步骤才能完成的工作单元。",
-    "用户要求完成的工作算任务；不确定是否属于任务时，优先把它当作任务。",
-    "",
-    "从下一个任务开始：把 task_start 作为第一项动作，先于读文件、运行命令、搜索或编辑。",
-    "本次不需要事后补开——补开得到的决策窗口是空的，反思只能基于零证据编造。",
-    "</lessons_task_missing>",
-  ].join("\n");
+  const { turn, everBefore } = ctx;
+
+  const L = [];
+  L.push("<lessons_task_info>");
+  L.push(
+    `事实：这一回合做了实际工作（${work.join("、")}），但没有声明任务。` +
+      (everBefore ? "（本会话此前开过任务，这一次没有。）" : "")
+  );
+  L.push("");
+  L.push("这不是错误，也不要求你补开。说明这一点是为了让你确认一件事：");
+  L.push("如果这段工作符合任务的定义，那么它现在没有被记录，也就不会出现在将来的反思里。");
+  L.push("");
+  L.push("任务的判定标准：一个具有明确目标或预期结果、需要一个或多个工作步骤才能完成的工作单元。");
+  L.push("用户要求完成的工作算任务；调查、分析、验证、修改、生成也算。");
+  L.push("");
+  L.push("你有不开的选择，但请确认是出于判断而不是疏忽：");
+  L.push("- 如果这一轮只是在对话、答疑、一次性的小改动，确实不构成任务 —— 那就不开，这是正确做法。");
+  L.push("- 如果它是一次真正的工作（哪怕是上一轮某任务的延续）—— 那么下一轮开始时，");
+  L.push("  把 task_start 作为第一项动作，先于读文件、运行命令、搜索或编辑。");
+  L.push("");
+  L.push("不需要为已经做完的事事后补开：补开的窗口是空的，反思只能基于零证据编造。");
+  L.push("</lessons_task_info>");
+  return L.join("\n");
 }
 
 const DEFAULTS = {
@@ -134,7 +161,16 @@ const DEFAULTS = {
   // 放在末尾时实测被工具文档淹没，合规率只有 1/2。
   taskBoundaryOrder: 700,
   /**
-   * 漏开任务的提醒：一个回合做了实质工作却从未声明任务时，在回合收尾注入一次提示。
+   * 漏开任务的提醒：一个回合做了实质工作、且该回合没有被任何任务覆盖时，
+   * 在回合收尾注入一次提示。
+   *
+   * 判定是**按本回合**，不是按整个会话。旧实现（sessionEverOpenedTask）
+   * 会在会话开过一次任务后永久豁免，导致这一轮的遗忘再也收不到提醒——
+   * 实测漏掉过连续 4 轮（127/73/21/62 次调用全部无 task_start）。
+   *
+   * 「本回合已被覆盖」= 本回合有 task_start / task_end，或会话当前有 open 任务
+   * （跨轮任务的中间轮，本来就在范围内，不该打扰）。
+   *
    * mode: "inject" 只进下一次输入（不唤醒，零额外成本）；
    *       "wake"   立刻唤醒 Agent 跑一个补录回合（会产生额外回合）。
    */
@@ -147,7 +183,27 @@ const DEFAULTS = {
    * 提醒只用于捕捉明显偏离（一整回合都在干活却忘了声明），因此取较高阈值。
    */
   missedTaskMinCalls: 8,
+  /** 每会话最多提醒几次（防止反复打扰；提醒本身不强制，见 missedTaskText） */
   missedTaskMaxPerSession: 2,
+  /**
+   * 按轮反思（**默认关闭**）：绕过 task_start / task_end 框选的范围，
+   * 每回合结束直接把该回合发生的事交给模型反思一次。
+   *
+   * 与任务模式的差别不是"更细"，而是**入口不依赖模型**：
+   *   · 任务模式：反思材料由 task_start/task_end 划定的窗口产生，
+   *     模型忘了开任务就完全没有材料 —— 这是入口处的达摩克利斯之剑。
+   *   · 按轮模式：材料由 turn 边界产生，模型无法通过"不开任务"关掉它。
+   *
+   * 代价是反思质量：turn 边界不是决策边界。实测本机 20 个可分析任务里
+   * 30% 跨了 2 个以上 turn（最多 13 个），所以按轮切分会把一个决策过程
+   * 切成几段，每段单独看都缺前因。它给的是"至少被检查过"，
+   * 不是"被正确检查过"。
+   *
+   * 两种模式可以同时存在：任务模式仍照常工作，本开关只额外增加轮级反思。
+   */
+  turnReflection: false,
+  /** 按轮反思的注入方式：notice = 作为下一条消息注入；wake = 立刻唤醒补一个回合 */
+  turnReflectionMode: "notice",
   /** 步骤 3：把积累的经验注入 system prompt */
   lessons: {
     enabled: true,
@@ -247,6 +303,10 @@ function readConfig(raw) {
     if (typeof raw.adversarialReview === "boolean") cfg.adversarialReview = raw.adversarialReview;
     if (typeof raw.precedentGate === "boolean") cfg.precedentGate = raw.precedentGate;
     if (typeof raw.precedentInPrompt === "boolean") cfg.precedentInPrompt = raw.precedentInPrompt;
+    if (typeof raw.turnReflection === "boolean") cfg.turnReflection = raw.turnReflection;
+    if (raw.turnReflectionMode === "notice" || raw.turnReflectionMode === "wake") {
+      cfg.turnReflectionMode = raw.turnReflectionMode;
+    }
     if (raw.lessons && typeof raw.lessons === "object") {
       const l = raw.lessons;
       if (typeof l.enabled === "boolean") cfg.lessons.enabled = l.enabled;
@@ -502,7 +562,45 @@ export function apply(ctx, rawConfig) {
    * sessionQuery 未就绪或瞬时失败时返回空数组，此时若直接写入
    * scannedNoTask，该会话会被永久误判为「从未开过任务」——此后每回合
    * 都会误报，直到下次插件重载。实测曾出现：日志里已有 28 次 task_start，
-   * 仍持续收到「没有声明任何任务」。
+  /**
+   * 判定「本回合是否已被任务覆盖」。
+   *
+   * 这是两件事，必须分开：
+   *   sessionEverOpenedTask  整个会话是否开过任务 → 只用于诊断/状态重建
+   *   turnHasTaskCoverage    本回合是否在任务范围内 → 决定要不要提醒
+   *
+   * 旧实现用前者决定两者，导致一个真实的漏洞：
+   * 会话开过一次任务后，这一轮的 task_start 遗忘就**永久**收不到提醒。
+   * 实测（会话 144577dd，插件部署后 35 轮）：最后连续 4 轮做了
+   * 127/73/21/62 次工具调用、全部未声明任务，一次提醒都没触发。
+   *
+   * 本回合「已被覆盖」的三种情况：
+   *   1. 本回合内调用了 task_start 或 task_end —— 明确在用任务边界
+   *   2. 会话当前有 open 任务 —— 跨轮任务的中间轮，本来就在范围内
+   *   3. 本回合整体落在某个任务的 [start_seq, end_seq] 内 —— 同上
+   *
+   * 三种都不成立，才说明这一轮真的没有任务边界。
+   *
+   * @returns {{covered:boolean, reason:string, openTaskId:string|null}}
+   */
+  function turnTaskCoverage(sessionId, turnEvents) {
+    const names = new Set();
+    for (const e of turnEvents) {
+      if (e?.type === "tool/call" && typeof e.data?.name === "string") names.add(e.data.name);
+    }
+    if (names.has("task_start")) return { covered: true, reason: "task_start-in-turn", openTaskId: null };
+    if (names.has("task_end")) return { covered: true, reason: "task_end-in-turn", openTaskId: null };
+
+    const state = open.get(sessionId);
+    if (state?.task?.task_id) {
+      return { covered: true, reason: "task-open", openTaskId: state.task.task_id };
+    }
+    return { covered: false, reason: "no-task-boundary", openTaskId: null };
+  }
+
+  /**
+   * 会话级历史：仅用于诊断与「是否首次提醒」的辅助判断，**不再决定是否提醒**。
+   * 保留它是因为诊断需要区分「从没开过任务」和「开过但这一轮忘了」。
    */
   async function sessionEverOpenedTask(agent, sessionId) {
     if (everOpened.has(sessionId)) return true;
@@ -561,13 +659,73 @@ export function apply(ctx, rawConfig) {
    *
    * 事件是 serial（无框架兜底），所以整体 try/catch，且绝不做耗时操作。
    */
+  /**
+   * 按轮反思（`turnReflection`，默认关闭）。
+   *
+   * 在回合收尾时独立触发，与「漏开任务提醒」互不影响 —— 后者是催模型开任务，
+   * 这个是不依赖模型也产生一份反思材料。
+   *
+   * 位置放在同一个 turn-stopping 监听器里，因为它已经有 events 与 sessionId；
+   * 但它有自己的 early return，不受 missedTaskNudge 的开关与次数限制影响。
+   */
+  async function maybeInjectTurnReflection(payload, events, sessionId) {
+    if (!cfg.turnReflection) return;
+    try {
+      // 当前回合的 seq 区间：最后一个 turn/start → 末尾
+      let from = -1;
+      let turnNo = payload?.turn ?? null;
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i]?.type === "turn/start") {
+          from = i;
+          if (events[i].data?.turn != null) turnNo = events[i].data.turn;
+          break;
+        }
+      }
+      if (from < 0) return;
+      const startSeq = events[from]?.seq;
+      const endSeq = events[events.length - 1]?.seq;
+      if (typeof startSeq !== "number" || typeof endSeq !== "number") return;
+
+      const trail = sliceDecisionTrail({ events, startSeq, endSeq });
+      const state = open.get(sessionId);
+      const brief = renderTurnBrief({
+        turn: turnNo ?? "?",
+        trail,
+        openTaskId: state?.task?.task_id ?? null,
+      });
+      if (!brief) return;
+
+      const agent = payload?.agent;
+      const message = makeNoticeMessage(brief, `turn ${turnNo ?? "?"} review`);
+      if (cfg.turnReflectionMode === "wake") safe(() => agent.followup(message));
+      else safe(() => agent.inject(message));
+      info(`[lessons] turn-level review injected for ${sessionId} (turn ${turnNo ?? "?"})`);
+    } catch (e) {
+      warn(`[lessons] turn-level review failed: ${String(e)}`);
+    }
+  }
+
   ctx.on("agent/turn-stopping", async (payload) => {
+    // ── 按轮反思：与「漏开任务提醒」完全独立 ──────────────────────────────
+    // 它必须在 missedTaskNudge 的 early return 之前执行，否则
+    // 关掉提醒就等于连轮级反思也关掉了。两者目的相反：
+    //   提醒 = 催模型去开任务（依赖模型配合）
+    //   按轮 = 模型不开任务也照样会有一份材料（不依赖模型）
+    try {
+      const sid = sessionIdOf(payload?.agent);
+      if (sid && cfg.turnReflection) {
+        const evs = await readEvents(sid);
+        if (Array.isArray(evs) && evs.length > 0) await maybeInjectTurnReflection(payload, evs, sid);
+      }
+    } catch (e) {
+      warn(`[lessons] turn reflection dispatch failed: ${String(e)}`);
+    }
+
     try {
       if (!cfg.missedTaskNudge) return;
       const agent = payload?.agent;
       const sessionId = sessionIdOf(agent);
       if (!sessionId) return;
-      if (await sessionEverOpenedTask(agent, sessionId)) return;
 
       const used = nudgeCount.get(sessionId) ?? 0;
       if (used >= cfg.missedTaskMaxPerSession) return;
@@ -584,19 +742,31 @@ export function apply(ctx, rawConfig) {
         }
       }
       if (turnStart < 0) return;
+      const turnEvents = events.slice(turnStart);
+
+      // ── 本回合是否已被任务覆盖 ──────────────────────────────────────────
+      // 判据是**本回合**，不是整个会话。旧实现用会话级判断，
+      // 导致开过一次任务后这一轮的遗忘永久收不到提醒。
+      const coverage = turnTaskCoverage(sessionId, turnEvents);
+      if (coverage.covered) {
+        info(`[lessons] no nudge for ${sessionId}: ${coverage.reason}`);
+        return;
+      }
 
       let calls = 0;
       let edits = 0;
-      for (let i = turnStart; i < events.length; i++) {
-        const e = events[i];
+      for (const e of turnEvents) {
         if (e?.type !== "tool/call") continue;
         const name = e.data?.name;
-        // task_start 的在场与否已由 sessionEverOpenedTask 统一判断
-        if (name === "task_start") continue;
+        // 任务类工具不算「实质工作」
+        if (name === "task_start" || name === "task_end" || name === "task_reflect") continue;
         calls += 1;
         if (name === "edit" || name === "write") edits += 1;
       }
       if (calls < cfg.missedTaskMinCalls && edits === 0) return;
+
+      // 诊断用：区分「从没开过任务」与「开过但这一轮忘了」
+      const everBefore = await sessionEverOpenedTask(agent, sessionId);
 
       nudgeCount.set(sessionId, used + 1);
       // 落盘：重载后仍记得已提醒几次，否则 missedTaskMaxPerSession 形同虚设
@@ -608,14 +778,20 @@ export function apply(ctx, rawConfig) {
             turn: payload?.turn ?? null,
             calls,
             edits,
+            // 区分「从没开过任务」与「开过但这一轮忘了」，两种提醒的措辞不同
+            ever_before: everBefore,
+            reason: coverage.reason,
             recorded_at: Date.now(),
           })
         );
       }
-      const message = makeNoticeMessage(missedTaskText(calls, edits), `missed task in turn ${payload?.turn ?? "?"}`);
+      const message = makeNoticeMessage(
+        missedTaskText(calls, edits, { turn: payload?.turn ?? null, everBefore }),
+        `missed task in turn ${payload?.turn ?? "?"}`
+      );
       if (cfg.missedTaskNudgeMode === "wake") safe(() => agent.followup(message));
       else safe(() => agent.inject(message));
-      info(`[lessons] missed-task nudge #${used + 1} for ${sessionId} (calls=${calls}, edits=${edits})`);
+      info(`[lessons] missed-task nudge #${used + 1} for ${sessionId} (calls=${calls}, edits=${edits}, everBefore=${everBefore})`);
     } catch (e) {
       warn(`[lessons] missed-task nudge failed: ${String(e)}`);
     }
