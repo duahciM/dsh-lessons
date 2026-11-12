@@ -48,25 +48,7 @@ Agent可能在不同任务中重复犯错,当前会话结束后,相关上下文�
 #### `lessons_lookup`：按需追溯，而不是预先塞满
 
 决策环境里每个条目都带 id，但**不会**把每条经验的完整来历一起放进去。需要时由 Agent
-自己决定查不查：
-
-```text
-LESSON task-afbdb466-…#0
-  problem:     危险操作先改代码、后验证，且只测成功路径。
-  correction:  审批前先解析出全部目标，失败的不进入流程…
-  applies when: 为不可逆操作加审批时
-  confidence:  high
-
-SOURCE TASK task-afbdb466-…
-  goal:     为经验删除增加人类审批门槛，避免误删记忆
-  expected: 没有 --yes 时删除被拒绝并显示预览…
-  status:   succeeded
-  result:   remove 默认改为只预览并 exit 3…
-  timeline: session events seq 9743..9831
-
-OTHER LESSONS IN FORCE WHEN THAT TASK STARTED (11 total):
-  [E2] (reflection, medium) 直接用 slice 截断…
-```
+自己决定查不查
 
 设计取舍：
 
