@@ -1,6 +1,6 @@
 {
   "name": "dsh-lessons",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "type": "module",
   "description": "Metacognition for DeepSeek Harness: task boundaries, structured reflection, and three-scope lessons injected into the system prompt.",
   "license": "MIT",

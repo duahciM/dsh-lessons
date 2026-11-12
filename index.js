@@ -171,8 +171,10 @@ const DEFAULTS = {
    * 「本回合已被覆盖」= 本回合有 task_start / task_end，或会话当前有 open 任务
    * （跨轮任务的中间轮，本来就在范围内，不该打扰）。
    *
-   * mode: "inject" 只进下一次输入（不唤醒，零额外成本）；
-   *       "wake"   立刻唤醒 Agent 跑一个补录回合（会产生额外回合）。
+   * mode: "inject" 只进下一次输入（不唤醒，零额外成本）。
+   *       "wake" 在当前 DSH 下**不生效**：它原本依赖 agent.followup()，
+   *       而当前 Agent 接口只有 `id`，没有推送通道。保留该值只为配置兼容，
+   *       实际行为会退化为 "inject"。
    */
   missedTaskNudge: true,
   missedTaskNudgeMode: "inject",
@@ -202,7 +204,12 @@ const DEFAULTS = {
    * 两种模式可以同时存在：任务模式仍照常工作，本开关只额外增加轮级反思。
    */
   turnReflection: false,
-  /** 按轮反思的注入方式：notice = 作为下一条消息注入；wake = 立刻唤醒补一个回合 */
+  /**
+   * 按轮反思的注入方式。
+   * notice = 排入待注入队列，下一次装配时交给模型（当前唯一可用路径）；
+   * wake   = 当前 DSH 下不生效（原本依赖 agent.followup，接口已无该通道），
+   *          行为退化为 notice。
+   */
   turnReflectionMode: "notice",
   /** 步骤 3：把积累的经验注入 system prompt */
   lessons: {
@@ -541,6 +548,30 @@ export function apply(ctx, rawConfig) {
       ctx.effect(() => () => safe(() => dispose?.()));
       info(`[lessons] lessons section "${cfg.lessons.sectionName}" registered at order ${cfg.lessons.order}`);
     }
+
+    // 待注入通知的出口。
+    // 回合收尾产生的提醒（按轮反思 / 漏开任务）没有可用的推送通道，
+    // 只能在这里排队，等下一次装配作为运行上下文交给模型。
+    const disposeNotices = systemPrompt.context({
+      name: "lessons:pending-notices",
+      // 紧跟记忆之后：两者都影响模型当下的行为
+      order: cfg.lessons.order + 100,
+      interpolate: false,
+      text: (context) => {
+        try {
+          const sessionId = resolveSessionId(context);
+          if (!sessionId) return "";
+          const notices = drainNotices(sessionId);
+          if (notices.length === 0) return "";
+          return notices.map((n) => n.text).join("\n\n");
+        } catch (e) {
+          warn(`[lessons] pending-notices render failed: ${String(e)}`);
+          return "";
+        }
+      },
+    });
+    ctx.effect(() => () => safe(() => disposeNotices?.()));
+    info("[lessons] pending-notices context registered");
   }
 
   // ── 漏开任务提醒 ────────────────────────────────────────────────────────
@@ -695,11 +726,10 @@ export function apply(ctx, rawConfig) {
       });
       if (!brief) return;
 
-      const agent = payload?.agent;
-      const message = makeNoticeMessage(brief, `turn ${turnNo ?? "?"} review`);
-      if (cfg.turnReflectionMode === "wake") safe(() => agent.followup(message));
-      else safe(() => agent.inject(message));
-      info(`[lessons] turn-level review injected for ${sessionId} (turn ${turnNo ?? "?"})`);
+      // 当前 DSH 的 Agent 只有 `id`，没有 inject/followup。
+      // 改为把消息排进该会话的待注入队列，由 systemPrompt.context() 的下一次装配取走。
+      enqueueNotice(sessionId, brief, `turn ${turnNo ?? "?"} review`);
+      info(`[lessons] turn-level review queued for ${sessionId} (turn ${turnNo ?? "?"})`);
     } catch (e) {
       warn(`[lessons] turn-level review failed: ${String(e)}`);
     }
@@ -785,12 +815,11 @@ export function apply(ctx, rawConfig) {
           })
         );
       }
-      const message = makeNoticeMessage(
+      enqueueNotice(
+        sessionId,
         missedTaskText(calls, edits, { turn: payload?.turn ?? null, everBefore }),
         `missed task in turn ${payload?.turn ?? "?"}`
       );
-      if (cfg.missedTaskNudgeMode === "wake") safe(() => agent.followup(message));
-      else safe(() => agent.inject(message));
       info(`[lessons] missed-task nudge #${used + 1} for ${sessionId} (calls=${calls}, edits=${edits}, everBefore=${everBefore})`);
     } catch (e) {
       warn(`[lessons] missed-task nudge failed: ${String(e)}`);
@@ -2023,6 +2052,28 @@ export function apply(ctx, rawConfig) {
   }
   function makeContextMessage(text, taskId) {
     return makeNoticeMessage(text, `task closed: ${taskId}`);
+  }
+
+  // ── 待注入通知队列 ────────────────────────────────────────────────────────
+  // 当前 DSH 的 Agent 只有 `id`，没有 inject/followup 之类的推送通道。
+  // 回合收尾时产生的提醒只能先入队，由下一次 systemPrompt 装配经
+  // systemPrompt.context() 取走并渲染进运行上下文。
+  const pendingNotices = new Map(); // sessionId -> [{ text, summary }]
+
+  function enqueueNotice(sessionId, text, summary) {
+    if (!sessionId || !text) return false;
+    const list = pendingNotices.get(sessionId) ?? [];
+    list.push({ text: String(text), summary: String(summary ?? "").slice(0, 120) });
+    pendingNotices.set(sessionId, list);
+    return true;
+  }
+
+  /** 取走（并清空）某会话的待注入通知。 */
+  function drainNotices(sessionId) {
+    const list = pendingNotices.get(sessionId);
+    if (!list || list.length === 0) return [];
+    pendingNotices.delete(sessionId);
+    return list;
   }
 
   // 卸载：落盘并封存仍开着的任务（会话结束时它们没有结果）
