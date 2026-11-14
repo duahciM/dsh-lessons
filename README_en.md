@@ -1,5 +1,6 @@
 # DSH Task Reflection Plugin (`dsh-lessons`)
 *(Effectiveness has not been experimentally proven; I can only guarantee it is useful in theory.)*
+
 (translated by Gemini)
 
 [中文](README.md)
