@@ -87,10 +87,11 @@
         # 不是"被正确检查过"。材料里已写明这个局限。
         #
         # 与 missedTaskNudge 完全独立：关掉提醒不影响按轮反思（反之亦然）。
+        #
+        # 投递方式固定为「排入待注入队列，下一次装配时交给模型」。
+        # 当前 DSH 的 Agent 接口只有 readonly id，没有 inject/followup 等推送通道，
+        # 无法立刻唤醒模型，因此这里不设 mode 开关（曾经有过，但不生效，只会误导）。
         turnReflection: false
-        # notice = 作为下一条消息注入（不产生额外回合）
-        # wake   = 立刻唤醒补一个反思回合（会产生额外回合与 token 消耗）
-        turnReflectionMode: 'notice'
 
         # ── 任务边界提醒 ────────────────────────────────────────────────
         # 一回合做了实质工作、且该回合没有被任何任务覆盖时，在回合收尾陈述一次。
@@ -101,10 +102,9 @@
         #
         # 「本回合已被覆盖」= 本回合有 task_start / task_end，
         # 或会话当前有 open 任务（跨轮任务的中间轮，本来就在范围内，不该打扰）。
+        #
+        # 投递方式同上：只有队列一条路，没有 mode 开关。
         missedTaskNudge: true
-        # inject = 只进下一次输入（不唤醒，零额外成本）
-        # wake   = 立刻唤醒补一个回合（会产生额外回合）
-        missedTaskNudgeMode: 'inject'
         # 触发提醒所需的最少工具调用次数（有文件改动时无条件触发）
         missedTaskMinCalls: 8
         # 每会话最多提醒几次，防止反复打扰。提醒本身不强制，见 missedTaskText

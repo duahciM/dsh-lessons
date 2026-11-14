@@ -171,13 +171,12 @@ const DEFAULTS = {
    * 「本回合已被覆盖」= 本回合有 task_start / task_end，或会话当前有 open 任务
    * （跨轮任务的中间轮，本来就在范围内，不该打扰）。
    *
-   * mode: "inject" 只进下一次输入（不唤醒，零额外成本）。
-   *       "wake" 在当前 DSH 下**不生效**：它原本依赖 agent.followup()，
-   *       而当前 Agent 接口只有 `id`，没有推送通道。保留该值只为配置兼容，
-   *       实际行为会退化为 "inject"。
+   * 投递方式只有一种：排入待注入队列，由下一次 systemPrompt 装配经
+   * systemPrompt.context() 交给模型。原因是当前 DSH 的 Agent 接口只有
+   * `readonly id`，没有 inject/followup 之类的推送通道，无法立刻唤醒模型。
+   * 因此这里**不设 mode 开关**——曾经有过，但它不生效，只会误导。
    */
   missedTaskNudge: true,
-  missedTaskNudgeMode: "inject",
   /**
    * 触发提醒所需的最少工具调用数。
    *
@@ -204,13 +203,6 @@ const DEFAULTS = {
    * 两种模式可以同时存在：任务模式仍照常工作，本开关只额外增加轮级反思。
    */
   turnReflection: false,
-  /**
-   * 按轮反思的注入方式。
-   * notice = 排入待注入队列，下一次装配时交给模型（当前唯一可用路径）；
-   * wake   = 当前 DSH 下不生效（原本依赖 agent.followup，接口已无该通道），
-   *          行为退化为 notice。
-   */
-  turnReflectionMode: "notice",
   /** 步骤 3：把积累的经验注入 system prompt */
   lessons: {
     enabled: true,
@@ -298,9 +290,6 @@ function readConfig(raw) {
     }
     if (Number.isFinite(raw.taskBoundaryOrder)) cfg.taskBoundaryOrder = raw.taskBoundaryOrder;
     if (typeof raw.missedTaskNudge === "boolean") cfg.missedTaskNudge = raw.missedTaskNudge;
-    if (raw.missedTaskNudgeMode === "inject" || raw.missedTaskNudgeMode === "wake") {
-      cfg.missedTaskNudgeMode = raw.missedTaskNudgeMode;
-    }
     if (Number.isSafeInteger(raw.missedTaskMinCalls) && raw.missedTaskMinCalls > 0) {
       cfg.missedTaskMinCalls = raw.missedTaskMinCalls;
     }
@@ -311,9 +300,6 @@ function readConfig(raw) {
     if (typeof raw.precedentGate === "boolean") cfg.precedentGate = raw.precedentGate;
     if (typeof raw.precedentInPrompt === "boolean") cfg.precedentInPrompt = raw.precedentInPrompt;
     if (typeof raw.turnReflection === "boolean") cfg.turnReflection = raw.turnReflection;
-    if (raw.turnReflectionMode === "notice" || raw.turnReflectionMode === "wake") {
-      cfg.turnReflectionMode = raw.turnReflectionMode;
-    }
     if (raw.lessons && typeof raw.lessons === "object") {
       const l = raw.lessons;
       if (typeof l.enabled === "boolean") cfg.lessons.enabled = l.enabled;
